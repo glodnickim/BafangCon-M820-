@@ -12,19 +12,67 @@ android {
         applicationId = rootProject.extra["defaultApplicationId"] as String
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+
+        val propsFile = rootProject.file("version.properties")
+        val vCode: Int
+        val vName: String
+        if (propsFile.exists()) {
+            val lines = propsFile.readLines()
+            vCode = lines.find { it.startsWith("versionCode=") }
+                ?.substringAfter("=")?.trim()?.toIntOrNull() ?: 1
+            vName = lines.find { it.startsWith("versionName=") }
+                ?.substringAfter("=")?.trim() ?: "0.001"
+        } else {
+            vCode = 1; vName = "0.001"
+        }
+        versionCode = vCode
+        versionName = vName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    val keystorePropsFile = rootProject.file("keystore.properties")
+    val keystoreProps: Map<String, String>? = if (keystorePropsFile.exists()) {
+        try {
+            keystorePropsFile.readLines().mapNotNull { line ->
+                val idx = line.indexOf('=')
+                if (idx > 0) line.substring(0, idx).trim() to line.substring(idx + 1).trim() else null
+            }.toMap()
+        } catch (_: Exception) { null }
+    } else null
+
+    signingConfigs {
+        create("release") {
+            if (keystoreProps != null) {
+                storeFile = rootProject.file(keystoreProps["storeFile"] ?: "bafangcon.keystore")
+                storePassword = keystoreProps["storePassword"] ?: "bafangcon"
+                keyAlias = keystoreProps["keyAlias"] ?: "bafangcon"
+                keyPassword = keystoreProps["keyPassword"] ?: "bafangcon"
+            }
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = true
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        debug {
+            isMinifyEnabled = false
         }
     }
     compileOptions {
@@ -35,7 +83,8 @@ android {
         jvmTarget = "11"
     }
     buildFeatures {
-        viewBinding =  true
+        viewBinding = true
+        buildConfig = true
     }
 }
 
@@ -75,5 +124,11 @@ dependencies {
     // Coroutines
     implementation(libs.kotlinx.coroutines.core) // Use latest stable aligned with Android version
     implementation(libs.kotlinx.coroutines.android)
+
+    // Gson - JSON serialization for presets
+    implementation(libs.gson)
+
+    // MPAndroidChart - assist curves
+    implementation(libs.mpandroidchart)
 
 }

@@ -25,6 +25,13 @@ enum class BleConnectionState {
     FAILED
 }
 
+enum class BleAuthState {
+    NOT_AUTHENTICATED,
+    AUTHENTICATING,
+    AUTHENTICATED,
+    AUTH_FAILED
+}
+
 data class DiscoveredBluetoothDevice(
     val name: String?,
     val address: String,

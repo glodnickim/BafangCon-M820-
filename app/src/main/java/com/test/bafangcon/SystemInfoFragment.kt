@@ -1,0 +1,206 @@
+package com.test.bafangcon
+
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.activityViewModels
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.LinearLayoutManager
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+class SystemInfoFragment : Fragment() {
+
+    private var _view: View? = null
+    private val root get() = _view!!
+    private val viewModel: DeviceViewModel by activityViewModels()
+
+    private lateinit var adapter: SystemInfoAdapter
+
+    private var currentBattery: BatteryInfo? = null
+    private var currentSensor: SensorInfo? = null
+    private var currentIotConfig: IotConfigInfo? = null
+    private var currentIotCan: IotCanInfo? = null
+    private var currentController: ControllerInfo? = null
+    private var currentMeter: MeterInfo? = null
+    private var currentPersonalized: PersonalizedInfo? = null
+
+    override fun onCreateView(
+        inflater: LayoutInflater, container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        val view = inflater.inflate(R.layout.fragment_system_info, container, false)
+        _view = view
+
+        val recyclerView = view.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.systemInfoRecyclerView)
+        recyclerView.layoutManager = LinearLayoutManager(requireContext())
+        adapter = SystemInfoAdapter()
+        recyclerView.adapter = adapter
+
+        return view
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch { viewModel.batteryInfo.collect { currentBattery = it; rebuildSections() } }
+                launch { viewModel.sensorInfo.collect { currentSensor = it; rebuildSections() } }
+                launch { viewModel.iotConfigInfo.collect { currentIotConfig = it; rebuildSections() } }
+                launch { viewModel.iotCanInfo.collect { currentIotCan = it; rebuildSections() } }
+                launch { viewModel.controllerInfo.collect { currentController = it; rebuildSections() } }
+                launch { viewModel.meterInfo.collect { currentMeter = it; rebuildSections() } }
+                launch { viewModel.personalizedInfo.collect { currentPersonalized = it; rebuildSections() } }
+            }
+        }
+
+        viewModel.requestControllerInfo()
+        viewModel.requestBatteryInfo()
+        viewModel.requestSensorInfo()
+        viewModel.requestConfigInfo()
+        viewModel.requestCanInfo()
+
+        // Auto-refresh controller data co 3s for live values
+        viewLifecycleOwner.lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    delay(3000)
+                    viewModel.requestControllerInfo()
+                }
+            }
+        }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _view = null
+    }
+
+    private fun rebuildSections() {
+        val sections = mutableListOf<SystemInfoSection>()
+
+        if (currentController != null) {
+            val c = currentController!!
+            val items = mutableListOf(
+                SystemInfoItem("Protocol Ver", "0x${String.format("%02X", c.controllerProtocolVersion)}"),
+                SystemInfoItem("Wheel Diameter", "${c.wheelDiameter} \""),
+                SystemInfoItem("Speed Limit", String.format("%.1f km/h", c.speedLimit * 0.01)),
+                SystemInfoItem("Acceleration", c.accelerationSettings.toString()),
+                SystemInfoItem("Speed", String.format("%.1f km/h", c.speed * 0.01)),
+                SystemInfoItem("Current", String.format("%.2f A", c.electricCurrent * 0.01)),
+                SystemInfoItem("Voltage", String.format("%.2f V", c.voltage * 0.01)),
+                SystemInfoItem("Cadence", "${c.cadence} RPM"),
+                SystemInfoItem("Torque", "${c.moment} mV"),
+                SystemInfoItem("Controller Temp", "${c.controllerTemperature} °C"),
+                SystemInfoItem("Motor Temp", if (c.motorTemperature > 200) "N/A" else "${c.motorTemperature} °C"),
+                SystemInfoItem("Boost", if (c.boostState != 0) "ON" else "OFF"),
+                SystemInfoItem("Gear", "${c.currentGear}/${c.totalGear}"),
+                SystemInfoItem("SOC", "${c.soc}%"),
+                SystemInfoItem("Calories", c.calories.toString())
+            )
+            sections.add(SystemInfoSection("Controller (A3)", items))
+        }
+
+        if (currentMeter != null) {
+            val m = currentMeter!!
+            val items = mutableListOf(
+                SystemInfoItem("Model", m.model),
+                SystemInfoItem("Hardware", m.hardVersion),
+                SystemInfoItem("Firmware", m.softVersion),
+                SystemInfoItem("Serial", m.sn),
+                SystemInfoItem("Total Mileage", "${m.totalMileage} km"),
+                SystemInfoItem("Max Speed", String.format("%.1f km/h", m.maxSpeed * 0.1)),
+                SystemInfoItem("Avg Speed", String.format("%.1f km/h", m.averageSpeed * 0.1))
+            )
+            sections.add(SystemInfoSection("Meter (A5)", items))
+        }
+
+        if (currentPersonalized != null) {
+            val p = currentPersonalized!!
+            val items = mutableListOf(
+                SystemInfoItem("Protocol Ver", "0x${String.format("%02X", p.controllerProtocolVersion)}"),
+                SystemInfoItem("Start Angle", p.motorStartingAngle.joinToString(", ") { it.toString() }),
+                SystemInfoItem("Speed Limits", p.gearSpeedLimit.joinToString(", ") { "${it.toInt() and 0xFF}%" }),
+                SystemInfoItem("Current Limits", p.gearCurrentLimit.joinToString(", ") { "${it.toInt() and 0xFF}%" }),
+                SystemInfoItem("Accel Set", p.accelerationSettings.joinToString(", ") { "${it.toInt() and 0xFF}" })
+            )
+            sections.add(SystemInfoSection("Personalized (A9)", items))
+        }
+
+        if (currentBattery != null) {
+            val b = currentBattery!!
+            val items = mutableListOf(
+                SystemInfoItem("Model", b.model),
+                SystemInfoItem("HW", b.hardVersion),
+                SystemInfoItem("FW", b.softVersion),
+                SystemInfoItem("Serial", b.sn),
+                SystemInfoItem("Manufacturer", b.manufacturer),
+                SystemInfoItem("Capacity", "${b.totalCapacity} Ah"),
+                SystemInfoItem("Residual", "${b.residualCapacity} Ah"),
+                SystemInfoItem("SOC", "${b.relativeCapacityPercent}%"),
+                SystemInfoItem("Voltage", String.format("%.2f V", b.totalVoltage * 0.01)),
+                SystemInfoItem("Current", String.format("%.2f A", b.electricCurrent * 0.01)),
+                SystemInfoItem("Temp", "${b.temperature} °C"),
+                SystemInfoItem("Cycles", b.cycles.toString()),
+                SystemInfoItem("Design Cap", "${b.designCapacity} Ah"),
+                SystemInfoItem("Max Charge V", String.format("%.2f V", b.maxChargeVoltage * 0.01))
+            )
+            sections.add(SystemInfoSection("Battery", items))
+        }
+
+        if (currentSensor != null) {
+            val s = currentSensor!!
+            val items = mutableListOf(
+                SystemInfoItem("Model", s.model),
+                SystemInfoItem("HW", s.hardVersion),
+                SystemInfoItem("FW", s.softVersion),
+                SystemInfoItem("Serial", s.sn),
+                SystemInfoItem("Manufacturer", s.manufacturer),
+                SystemInfoItem("Voltage Signal", s.voltageSignal.toString()),
+                SystemInfoItem("Cadence", s.cadence.toString())
+            )
+            sections.add(SystemInfoSection("Torque Sensor", items))
+        }
+
+        if (currentIotConfig != null) {
+            val c = currentIotConfig!!
+            val items = mutableListOf(
+                SystemInfoItem("Model", c.model),
+                SystemInfoItem("FW", c.softVersion),
+                SystemInfoItem("Serial", c.sn),
+                SystemInfoItem("ICCID", c.iccid),
+                SystemInfoItem("IMEI", c.imei),
+                SystemInfoItem("Server", c.server),
+                SystemInfoItem("Port", c.port),
+                SystemInfoItem("APN", c.apn),
+                SystemInfoItem("BLE Name", c.bleName)
+            )
+            sections.add(SystemInfoSection("IOT Config (A1)", items))
+        }
+
+        if (currentIotCan != null) {
+            val c = currentIotCan!!
+            val items = mutableListOf(
+                SystemInfoItem("BLE Model", c.bleModel.toString()),
+                SystemInfoItem("Network Model", c.networkModel.toString()),
+                SystemInfoItem("BLE Report Model", c.bleReportModel.toString()),
+                SystemInfoItem("BLE Interval", "${c.bleReportInterval} ms"),
+                SystemInfoItem("Network Interval", "${c.networkReportInterval} ms"),
+                SystemInfoItem("Custom Data", c.customizeData),
+                SystemInfoItem("CAN Filters", c.canFilters.joinToString(", "))
+            )
+            sections.add(SystemInfoSection("IOT CAN (A2)", items))
+        }
+
+        if (sections.isEmpty()) {
+            sections.add(SystemInfoSection("Info", listOf(SystemInfoItem("No data", "Requesting..."))))
+        }
+
+        adapter.updateData(sections)
+    }
+}

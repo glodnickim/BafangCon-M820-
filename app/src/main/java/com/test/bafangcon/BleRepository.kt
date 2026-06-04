@@ -11,6 +11,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import com.test.bafangcon.utils.AESUtils
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -43,6 +44,22 @@ class BleRepository(private val context: Context) {
     // Add StateFlow for PersonalizedInfo
     private val _personalizedInfo = MutableStateFlow<PersonalizedInfo?>(null)
     val personalizedInfo: StateFlow<PersonalizedInfo?> = _personalizedInfo.asStateFlow()
+
+    private val _batteryInfo = MutableStateFlow<BatteryInfo?>(null)
+    val batteryInfo: StateFlow<BatteryInfo?> = _batteryInfo.asStateFlow()
+
+    private val _sensorInfo = MutableStateFlow<SensorInfo?>(null)
+    val sensorInfo: StateFlow<SensorInfo?> = _sensorInfo.asStateFlow()
+
+    private val _iotConfigInfo = MutableStateFlow<IotConfigInfo?>(null)
+    val iotConfigInfo: StateFlow<IotConfigInfo?> = _iotConfigInfo.asStateFlow()
+
+    private val _iotCanInfo = MutableStateFlow<IotCanInfo?>(null)
+    val iotCanInfo: StateFlow<IotCanInfo?> = _iotCanInfo.asStateFlow()
+    // --------------------------------------
+    // --- Auth State ---
+    private val _authState = MutableStateFlow(BleAuthState.NOT_AUTHENTICATED)
+    val authState: StateFlow<BleAuthState> = _authState.asStateFlow()
     // --------------------------------------
     // --- General BLE State ---
     private val _connectionState = MutableStateFlow(BleConnectionState.DISCONNECTED)
@@ -51,17 +68,43 @@ class BleRepository(private val context: Context) {
     private val _scanResults = MutableStateFlow<Set<DiscoveredBluetoothDevice>>(emptySet())
     val scanResults: StateFlow<Set<DiscoveredBluetoothDevice>> = _scanResults.asStateFlow()
 
+    val bleLogs = MutableStateFlow<List<String>>(emptyList())
+    private val _connectionError = MutableStateFlow<String?>(null)
+    val connectionError: StateFlow<String?> = _connectionError.asStateFlow()
+
+    fun addLog(msg: String) {
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
+        bleLogs.value = bleLogs.value + "[$timestamp] $msg"
+    }
+
+    fun clearBleLogs() { bleLogs.value = emptyList() }
+    fun clearPersonalizedInfo() { _personalizedInfo.value = null }
+    fun setPersonalizedInfo(info: PersonalizedInfo) { _personalizedInfo.value = info }
+
     // --- Coroutine Scope ---
     private val coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var scanJob: Job? = null
     private var connectJob: Job? = null
+    private var heartbeatJob: Job? = null
 
     // --- Fragmentation Buffering State ---
     private var isAssemblingFragmentedFrame: Boolean = false
     private val fragmentedFrameBuffer = ByteArrayOutputStream()
     private var expectedFragmentedFrameLength: Int = 0 // Store expected total length
+    private var negotiatedMtu: Int = 23
+    private var pendingPersonalizedWrite: PendingPersonalizedWrite? = null
+    private var lastWriteTimeMs: Long = 0
     // -----------------------------------
-    // ..
+    // --- Auth State Tracking ---
+    private var authChallenge: ByteArray? = null
+    private var isAuthFlowRunning = false
+    // ------------------------
+
+    private data class PendingPersonalizedWrite(
+        val targetType: Byte,
+        val startPosition: Byte,
+        val payload: ByteArray
+    )
 
     companion object {
         private const val TAG = "BleRepository"
@@ -75,15 +118,12 @@ class BleRepository(private val context: Context) {
         private const val FIXED_VALUE_2: Byte = 0x11        // Indicates a request/command
         private const val READ_INDICATOR: Byte = 0x01       // Respond command for read 0X2 for write
         private const val WRITE_INDICATOR: Byte = 0x02      // Differentiates write commands
+        private const val CERTIFICATION_INDICATOR: Byte = 0x20 // Certification command
+    private const val EVENT_NOTIFICATION_INDICATOR: Byte = 0x21 // Event notification command
 
+        private const val CMD_ID_AUTH: Byte = 0x10         // Auth device
 
         private const val READ_FRAME_SIZE: Int = 10
-        private const val FRAME_END_BYTE_FE: Byte = -0x02          // 0xFE
-        private const val FRAME_END_BYTE_FF: Byte = -0x01           // 0xFF (As per example)
-        private const val WRITE_FRAME_END_BYTE: Byte = -0x02        // 0xFE
-
-        // Fixed size for these specific write commands
-        private const val WRITE_CMD_FRAME_SIZE: Int = 10
 
         // --- Received Frame Structure Indices/Offsets
         // Byte Pos | Field                  | Index | Example (Partial SoftVer)
@@ -338,6 +378,7 @@ class BleRepository(private val context: Context) {
     }
     @SuppressLint("MissingPermission")
     private fun handleDisconnectOrFailure() {
+        val wasConnecting = _connectionState.value == BleConnectionState.CONNECTING
         currentGatt?.close() // Ensure closed if not null
         currentGatt = null
         writeCharacteristic = null
@@ -346,6 +387,22 @@ class BleRepository(private val context: Context) {
         // Reset parsed data StateFlows
         _controllerInfo.value = null
         _meterInfo.value = null
+        _personalizedInfo.value = null
+        _batteryInfo.value = null
+        _sensorInfo.value = null
+        _iotConfigInfo.value = null
+        _iotCanInfo.value = null
+        // Reset auth state
+        _authState.value = BleAuthState.NOT_AUTHENTICATED
+        authChallenge = null
+        isAuthFlowRunning = false
+        pendingPersonalizedWrite = null
+        negotiatedMtu = 23
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+        if (wasConnecting) {
+            _connectionError.value = "Connection failed or timeout"
+        }
         if (_connectionState.value != BleConnectionState.DISCONNECTED) {
             _connectionState.value = BleConnectionState.DISCONNECTED // Default to disconnected state
         }
@@ -394,6 +451,7 @@ class BleRepository(private val context: Context) {
             coroutineScope.launch {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.i(TAG, "Services discovered successfully for $deviceName.")
+                    logDiscoveredGatt(gatt)
                     val service = gatt.getService(BleConstants.SERVICE_UUID) // Check for NUS
                     if (service == null) {
                         Log.e(TAG, "Nordic UART Service ${BleConstants.SERVICE_UUID} not found on $deviceName")
@@ -409,6 +467,8 @@ class BleRepository(private val context: Context) {
                         _connectionState.value = BleConnectionState.FAILED
                         return@launch
                     }
+                    Log.i(TAG, "NUS write characteristic properties: ${describeProperties(writeCharacteristic!!.properties)}")
+                    Log.i(TAG, "NUS notify characteristic properties: ${describeProperties(notifyCharacteristic!!.properties)}")
                     enableNotifications(gatt, notifyCharacteristic!!)
                 } else {
                     Log.e(TAG, "Service discovery failed for $deviceName with status: $status")
@@ -447,12 +507,12 @@ class BleRepository(private val context: Context) {
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         Log.i(TAG, "Notifications enabled successfully for $deviceName")
                         _connectionState.value = BleConnectionState.CONNECTED
-                        //connectJob?.cancel()
-                        processNextCommand() // Try sending queued commands now
+                        // Start auth flow and request MTU
+                        startAuthentication()
+                        requestMtu(gatt)
                     } else {
                         Log.e(TAG, "Failed to write CCCD for $deviceName. Status: $status")
                         gatt.disconnect()
-                       // _connectionState.value = BleConnectionState.FAILED
                     }
                 } else { Log.w(TAG, "onDescriptorWrite for unknown descriptor: ${descriptor.uuid}") }
             }
@@ -468,6 +528,7 @@ class BleRepository(private val context: Context) {
             coroutineScope.launch {
                 if (characteristic.uuid == BleConstants.UART_WRITE_UUID) {
                     if (status == BluetoothGatt.GATT_SUCCESS) {
+                        lastWriteTimeMs = System.currentTimeMillis()
                         Log.i(TAG, "Successfully wrote to NUS RX (${characteristic.uuid}) on $deviceName: $dataWrittenHex")
                     } else {
                         Log.e(TAG, "Failed to write to NUS RX (${characteristic.uuid}) on $deviceName. Status: $status ")
@@ -493,7 +554,10 @@ class BleRepository(private val context: Context) {
         @SuppressLint("MissingPermission")
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             val deviceName = gatt.device.name ?: gatt.device.address
-            if (status == BluetoothGatt.GATT_SUCCESS) { Log.i(TAG, "MTU changed to $mtu for $deviceName"); }
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                negotiatedMtu = mtu
+                Log.i(TAG, "MTU changed to $mtu for $deviceName (max write payload ${maxWritePayloadSize()} bytes)")
+            }
             else { Log.w(TAG, "MTU change failed for $deviceName. Status: $status"); }
         }
     } // End gattCallback
@@ -501,9 +565,8 @@ class BleRepository(private val context: Context) {
 // --- Data Sending and Queue Handling ---
 
     /**
-     * Creates a write command frame (55 AA ... ChecksumL ChecksumH or 55 AA ... Checksum FE).
-     * Uses AA55Pack checksum logic for multi-byte payloads, and original 8-bit checksum
-     * plus FE trailer for single-byte payloads.
+     * Creates a write command frame (55 AA ... ChecksumL ChecksumH).
+     * Always uses AA55Pack 2-byte checksum logic.
      *
      * @param targetInfoType The Command ID byte indicating the target data structure (e.g., CMD_ID_METER).
      * @param startPosition The offset within the target structure to write to.
@@ -511,7 +574,6 @@ class BleRepository(private val context: Context) {
      * @return The command frame byte array.
      */
     private fun createWriteRequestFrame(targetInfoType: Byte, startPosition: Byte, payloadData: ByteArray): ByteArray {
-        // --- Calculate Frame Sizes ---
         val payloadLength = payloadData.size
         if (payloadLength < 1) {
             Log.e(TAG, "Write payload cannot be empty.")
@@ -519,16 +581,11 @@ class BleRepository(private val context: Context) {
         }
 
         val headerSize = 7 // 55 AA Len 11 Cmd 02 StartPos
-        val isMultiBytePayload = payloadLength > 1
-        val checksumSize = if (isMultiBytePayload) 2 else 1 // 2 bytes for AA55, 1 for original
-        val trailerSize = if (isMultiBytePayload) 0 else 1 // 0 bytes for AA55 (checksum replaces FE), 1 byte (FE) for original
+        val checksumSize = 2 // Always 2-byte AA55 checksum
+        val totalFrameSize = headerSize + payloadLength + checksumSize
 
-        val totalFrameSize = headerSize + payloadLength + checksumSize + trailerSize
-
-        // Create the frame array
         val frame = ByteArray(totalFrameSize)
 
-        // --- Fill Frame Header ---
         var index = 0
         frame[index++] = FRAME_START_BYTE_1      // 55
         frame[index++] = FRAME_START_BYTE_2      // AA
@@ -538,45 +595,28 @@ class BleRepository(private val context: Context) {
         frame[index++] = WRITE_INDICATOR         // 02
         frame[index++] = startPosition           // e.g., A4, A6
 
-        // --- Add Payload Data ---
         System.arraycopy(payloadData, 0, frame, index, payloadLength)
-        index += payloadLength // index now points to where checksum starts
+        index += payloadLength
 
-        // --- Calculate and Add Checksum ---
-        val checksumEndIndex = index - 1 // Index of the last payload byte
+        // AA55Pack 16-bit checksum: (~sum) & 0xFFFF
+        val checksumEndIndex = index - 1
         var sum: Int = 0
-        // Sum bytes from index 2 (Length) up to the end of the payload
         for (i in 2..checksumEndIndex) {
             sum += (frame[i].toInt() and 0xFF)
         }
-        sum = sum and -1 // Mask sum to 32 bits just in case
+        val calculatedChecksum = sum.inv() and 0xFFFF
+        Log.v(TAG, "AA55 Checksum Calc: Sum=0x${sum.toString(16)}, CS=0x${calculatedChecksum.toString(16).padStart(4, '0')}")
 
-        if (isMultiBytePayload) {
-            // --- Use AA55Pack 16-bit checksum logic ---
-            // Checksum = ( 0xFFFFF ^ Sum ) & 0xFFFF --> effectively (~Sum) & 0xFFFF
-            val calculatedChecksum = sum.inv() and 0xFFFF
-            Log.v(TAG, "AA55 Checksum Calc: Sum=0x${sum.toString(16)}, CS=0x${calculatedChecksum.toString(16).padStart(4, '0')}")
+        frame[index++] = (calculatedChecksum and 0xFF).toByte()       // LSB
+        frame[index++] = ((calculatedChecksum shr 8) and 0xFF).toByte() // MSB
 
-            frame[index++] = (calculatedChecksum and 0xFF).toByte()       // LSB
-            frame[index++] = ((calculatedChecksum shr 8) and 0xFF).toByte() // MSB
-            // No FE byte added here for multi-byte AA55 logic
-        } else {
-            // --- Use original 8-bit checksum for single-byte payloads ---
-            // Checksum = ( 0xFF - ( Sum & 0xFF ) ) & 0xFF
-            val sumLsb = sum and 0xFF
-            val checksum = (0xFF - sumLsb) and 0xFF
-            Log.v(TAG, "8-Bit Checksum Calc: Sum=0x${sum.toString(16)}, CS=0x${checksum.toString(16).padStart(2, '0')}")
-
-            frame[index++] = checksum.toByte()
-            frame[index++] = WRITE_FRAME_END_BYTE      // Add FE trailer ONLY for single-byte payloads
+        if (frame.size > maxWritePayloadSize()) {
+            Log.w(
+                TAG,
+                "Write frame (${frame.size} bytes) is larger than current GATT payload limit " +
+                    "${maxWritePayloadSize()} bytes (MTU=$negotiatedMtu). Long writes may fail unless MTU changed."
+            )
         }
-
-        // --- Final Check ---
-        if (index != totalFrameSize) {
-            Log.e(TAG, "Frame construction size mismatch! Expected $totalFrameSize, Got $index. PayloadLen=$payloadLength, isMulti=$isMultiBytePayload")
-            return byteArrayOf() // Return empty on internal error
-        }
-
         Log.d(TAG, "Created Write Frame: ${frame.toHexString()}")
         return frame
     }
@@ -651,11 +691,139 @@ class BleRepository(private val context: Context) {
 
         // 4. Queue the command if frame creation was successful
         if (commandFrame.isNotEmpty()) {
+            pendingPersonalizedWrite = PendingPersonalizedWrite(
+                targetType = CMD_ID_PERSONALIZED,
+                startPosition = 0x41.toByte(),
+                payload = payload.copyOf()
+            )
+            Log.i(TAG, "Personalized write expected payload[0x41..0x72]: ${payload.toHexString()}")
             Log.d(TAG,"Queueing Personalized Write: ${commandFrame.toHexString()}")
             sendCommand(commandFrame)
         } else {
             Log.e(TAG,"Failed to create personalized write frame.")
         }
+    }
+
+    fun sendControllerAccelerationUpdate(value: Byte) {
+        Log.d(TAG, "TEST: Sending Controller acceleration single byte = $value (0x${value.toHexString()})")
+        sendSingleByteUpdate(CMD_ID_CONTROLLER, 213.toByte(), value)
+    }
+
+    fun sendControllerFullBlockUpdate(modifiedRawData: ByteArray) {
+        Log.d(TAG, "Writing full Controller block (${modifiedRawData.size} bytes at offset 0)")
+        val commandFrame = createWriteRequestFrame(
+            targetInfoType = CMD_ID_CONTROLLER,
+            startPosition = 0.toByte(),
+            payloadData = modifiedRawData
+        )
+        if (commandFrame.isNotEmpty()) {
+            Log.i(TAG, "Queueing full Controller block write")
+            sendCommand(commandFrame)
+        } else {
+            Log.e(TAG, "Failed to create full Controller block write frame")
+        }
+    }
+
+    fun sendControllerPartialUpdate(startOffset: Byte, payload: ByteArray) {
+        Log.d(TAG, "Writing Controller partial (${payload.size} bytes at offset 0x${String.format("%02X", startOffset)})")
+        val commandFrame = createWriteRequestFrame(
+            targetInfoType = CMD_ID_CONTROLLER,
+            startPosition = startOffset,
+            payloadData = payload
+        )
+        if (commandFrame.isNotEmpty()) {
+            Log.i(TAG, "Queueing Controller partial write: ${commandFrame.toHexString()}")
+            sendCommand(commandFrame)
+        } else {
+            Log.e(TAG, "Failed to create Controller partial write frame")
+        }
+    }
+
+    fun sendPersonalizedAccelerationSingleUpdate(value: Byte) {
+        Log.d(TAG, "TEST: Sending Personalized acceleration[0] single byte = $value (0x${value.toHexString()})")
+        sendSingleByteUpdate(CMD_ID_PERSONALIZED, 0x55.toByte(), value)
+    }
+
+    /**
+     * Creates a certification frame (command 0x20) for AES auth.
+     * Format: 55 AA 10 11 10 20 00 <16 encrypted bytes> CS_LO CS_HI
+     */
+    private fun createCertificationFrame(targetType: Byte, address: Byte, encryptedData: ByteArray): ByteArray {
+        if (encryptedData.size != 16) {
+            Log.e(TAG, "Certification data must be exactly 16 bytes, got ${encryptedData.size}")
+            return byteArrayOf()
+        }
+
+        val headerSize = 7
+        val payloadLength = encryptedData.size // 16
+        val checksumSize = 2
+        val totalFrameSize = headerSize + payloadLength + checksumSize
+
+        val frame = ByteArray(totalFrameSize)
+
+        var index = 0
+        frame[index++] = FRAME_START_BYTE_1        // 55
+        frame[index++] = FRAME_START_BYTE_2        // AA
+        frame[index++] = payloadLength.toByte()    // 0x10
+        frame[index++] = FIXED_VALUE_2             // 11
+        frame[index++] = targetType                // 0x10 (auth)
+        frame[index++] = CERTIFICATION_INDICATOR   // 0x20
+        frame[index++] = address                   // 0x00
+
+        System.arraycopy(encryptedData, 0, frame, index, payloadLength)
+        index += payloadLength
+
+        var sum: Int = 0
+        for (i in 2 until index) {
+            sum += (frame[i].toInt() and 0xFF)
+        }
+        val calculatedChecksum = sum.inv() and 0xFFFF
+
+        frame[index++] = (calculatedChecksum and 0xFF).toByte()
+        frame[index++] = ((calculatedChecksum shr 8) and 0xFF).toByte()
+
+        Log.d(TAG, "Created Certification Frame: ${frame.toHexString()}")
+        return frame
+    }
+
+    /**
+     * Creates an event notification frame (command 0x21) used for heartbeat.
+     * Format: 55 AA LEN 11 10 21 02 <payload> CS_LO CS_HI
+     * Target = 0x10 (DeviceType_IOT), Address = 0x02
+     */
+    private fun createEventNotificationFrame(payloadData: ByteArray): ByteArray {
+        if (payloadData.isEmpty()) {
+            Log.e(TAG, "Event notification payload cannot be empty.")
+            return byteArrayOf()
+        }
+        val headerSize = 7
+        val checksumSize = 2
+        val totalFrameSize = headerSize + payloadData.size + checksumSize
+
+        val frame = ByteArray(totalFrameSize)
+        var index = 0
+        frame[index++] = FRAME_START_BYTE_1
+        frame[index++] = FRAME_START_BYTE_2
+        frame[index++] = payloadData.size.toByte()
+        frame[index++] = FIXED_VALUE_2
+        frame[index++] = CMD_ID_AUTH          // 0x10 = DeviceType_IOT
+        frame[index++] = EVENT_NOTIFICATION_INDICATOR // 0x21
+        frame[index++] = 0x02                 // address
+
+        System.arraycopy(payloadData, 0, frame, index, payloadData.size)
+        index += payloadData.size
+
+        // AA55Pack 16-bit checksum: (~sum) & 0xFFFF
+        var sum = 0
+        for (i in 2 until index) {
+            sum += (frame[i].toInt() and 0xFF)
+        }
+        val checksum = sum.inv() and 0xFFFF
+        frame[index++] = (checksum and 0xFF).toByte()
+        frame[index++] = ((checksum shr 8) and 0xFF).toByte()
+
+        Log.d(TAG, "Created Event Notification Frame: ${frame.toHexString()}")
+        return frame
     }
 
     /** Sets the Headlight state (Assumes 1 byte payload) */
@@ -679,7 +847,7 @@ class BleRepository(private val context: Context) {
 
         val commandFrame = createWriteRequestFrame(
             targetInfoType = CMD_ID_CONTROLLER,
-            startPosition = 184.toByte(),
+            startPosition = 188.toByte(),
             payloadData = payload
         )
         //  Queue the command if frame creation was successful
@@ -692,55 +860,154 @@ class BleRepository(private val context: Context) {
 
     }
 
+    // --- MTU ---
+    private fun requestMtu(gatt: BluetoothGatt) {
+        @SuppressLint("MissingPermission")
+        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.requestMtu(250)
+        } else {
+            @Suppress("DEPRECATION")
+            gatt.requestMtu(250)
+        }
+        Log.d(TAG, "Requested MTU 250, result: $result")
+    }
+
+    // --- Auth Flow ---
+    private fun startAuthentication() {
+        Log.i(TAG, "Starting authentication flow...")
+        authChallenge = null
+        isAuthFlowRunning = true
+        _authState.value = BleAuthState.AUTHENTICATING
+
+        // Step 1: Read 4 random bytes from auth device
+        val frame = createReadRequestFrame(CMD_ID_AUTH, 0, 4)
+        if (frame.isNotEmpty()) {
+            sendCommand(frame)
+            Log.d(TAG, "Auth step 1: sent meterRead(0x10, 0x00, 4)")
+        } else {
+            Log.e(TAG, "Failed to create auth read frame")
+            _authState.value = BleAuthState.AUTH_FAILED
+            isAuthFlowRunning = false
+        }
+    }
+
+    private fun handleAuthChallenge(payload: ByteArray) {
+        if (payload.size != 4) {
+            Log.e(TAG, "Auth challenge expected 4 bytes, got ${payload.size}")
+            _authState.value = BleAuthState.AUTH_FAILED
+            isAuthFlowRunning = false
+            return
+        }
+
+        authChallenge = payload.copyOf()
+        Log.d(TAG, "Auth step 1 complete: received challenge ${payload.toHexString()}")
+
+        // Step 2: Pad to 16 bytes with zeros, encrypt with AES
+        val padded = payload + ByteArray(12) // 4 + 12 zeros = 16
+        val encrypted = AESUtils.encrypt(padded)
+
+        if (encrypted == null) {
+            Log.e(TAG, "Auth step 2 failed: AES encryption returned null")
+            _authState.value = BleAuthState.AUTH_FAILED
+            isAuthFlowRunning = false
+            return
+        }
+
+        Log.d(TAG, "Auth step 2: AES encrypted -> ${encrypted.toHexString()}")
+
+        // Step 3: Send certification
+        val certFrame = createCertificationFrame(CMD_ID_AUTH, 0, encrypted)
+        if (certFrame.isNotEmpty()) {
+            sendCommand(certFrame)
+            Log.d(TAG, "Auth step 3: sent certification")
+        } else {
+            Log.e(TAG, "Failed to create certification frame")
+            _authState.value = BleAuthState.AUTH_FAILED
+            isAuthFlowRunning = false
+        }
+    }
+
+    private fun handleAuthResult(resultPayload: ByteArray) {
+        // Expected payload: [commandEcho, address, result]
+        val result = if (resultPayload.size >= 3) {
+            resultPayload[2].toInt() and 0xFF
+        } else if (resultPayload.size >= 1) {
+            resultPayload[0].toInt() and 0xFF
+        } else {
+            -1
+        }
+
+        if (result == 0) {
+            Log.i(TAG, "Authentication SUCCESSFUL!")
+            _authState.value = BleAuthState.AUTHENTICATED
+            // Pre-fetch all data immediately so UI has it as soon as it renders
+            coroutineScope.launch {
+                kotlinx.coroutines.delay(200)
+                sendReadRequestCommand(CMD_ID_CONTROLLER)
+                sendReadRequestCommand(CMD_ID_METER)
+                sendReadRequestCommand(CMD_ID_BATTERY)
+                sendReadRequestCommand(CMD_ID_SENSOR)
+                sendReadRequestCommand(CMD_ID_CONFIG)
+                sendReadRequestCommand(CMD_ID_CAN)
+            }
+            // Start heartbeat (co 1s) to keep BLE notification stream alive
+            heartbeatJob?.cancel()
+            heartbeatJob = coroutineScope.launch {
+                while (isActive) {
+                    val timestamp = System.currentTimeMillis() / 1000
+                    val payload = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt((timestamp and 0xFFFFFFFFL).toInt()).array()
+                    val frame = createEventNotificationFrame(payload)
+                    if (frame.isNotEmpty()) {
+                        sendCommand(frame)
+                    }
+                    delay(1000)
+                }
+            }
+        } else {
+            Log.e(TAG, "Authentication FAILED. Result: $result (payload: ${resultPayload.toHexString()})")
+            _authState.value = BleAuthState.AUTH_FAILED
+        }
+        isAuthFlowRunning = false
+        authChallenge = null
+    }
+
     /**
-     * Creates a 10-byte custom command frame (55 AA ... FF) to request a specific
-     * data segment.
+     * Creates a read request frame (55 AA 01 11 TARGET 01 ADDR LEN CS_LO CS_HI).
+     * Uses AA55Pack 2-byte checksum.
      *
      * @param commandId The target device/info type (e.g., CMD_ID_METER).
      * @param startPosition The starting byte offset of the data to read (0-255).
      * @param requestedLength The number of bytes to read (0-255).
-     * @return The 10-byte command frame, or an empty ByteArray on error.
+     * @return The read command frame byte array, or an empty ByteArray on error.
      */
-    @SuppressLint("SuspiciousIndentation")
     private fun createReadRequestFrame(commandId: Byte, startPosition: Int, requestedLength: Int): ByteArray {
-        // Input validation
         if (startPosition !in 0..255 || requestedLength !in 0..255) {
-            Log.e(
-                TAG,
-                "Invalid startPosition ($startPosition) or requestedLength ($requestedLength). Must be 0-255."
-            )
+            Log.e(TAG, "Invalid startPosition ($startPosition) or requestedLength ($requestedLength). Must be 0-255.")
             return byteArrayOf()
         }
 
-        // Create the 10-byte frame array
-        val frame = ByteArray(READ_FRAME_SIZE) // Should be 10
+        // Standard AA55Pack format: 55 AA 01 11 TARGET 01 ADDR LEN CS_LO CS_HI (10 bytes)
+        // 16-bit checksum: (~sum[2..7]) & 0xFFFF
+        val frame = ByteArray(10)
 
-        // Fill fixed and variable parts (Indices 0-7)
         frame[0] = FRAME_START_BYTE_1          // 55
         frame[1] = FRAME_START_BYTE_2          // AA
-        frame[2] = FIXED_VALUE_1               // 01
+        frame[2] = FIXED_VALUE_1               // 01 (LEN)
         frame[3] = FIXED_VALUE_2               // 11
-        frame[4] = commandId                   // e.g., A5
-        frame[5] = READ_INDICATOR              // 01 Respond command for read 0X2 for write
+        frame[4] = commandId                   // e.g., 0x10 (auth), 0xA5 (controller)
+        frame[5] = READ_INDICATOR              // 01
         frame[6] = startPosition.toByte()      // Starting byte offset
         frame[7] = requestedLength.toByte()    // Length to read
 
-        // Calculate Checksum (Bytes 3 to 8 / Indices 2 to 7)
-        // Checksum = ( 0xFF - ( Sum(Bytes 3 to 8) & 0xFF ) ) & 0xFF
+        // AA55Pack 16-bit checksum: (~sum) & 0xFFFF
         var sum: Int = 0
-        for (i in 2..7) { // Sum bytes at indices 2, 3, 4, 5, 6, 7
+        for (i in 2..7) {
             sum += (frame[i].toInt() and 0xFF)
         }
-        val sumLsb = sum and 0xFF
-        val checksum = (0xFF - sumLsb) and 0xFF
-        frame[8] = checksum.toByte() // Checksum byte at index 8
+        val calculatedChecksum = sum.inv() and 0xFFFF
+        frame[8] = (calculatedChecksum and 0xFF).toByte()       // CS_LO
+        frame[9] = ((calculatedChecksum shr 8) and 0xFF).toByte() // CS_HI
 
-        // End Frame
-        if (startPosition > 0) {
-            frame[9] = FRAME_END_BYTE_FF   // FF
-        } else {
-            frame[9] = FRAME_END_BYTE_FE      // FE
-        }
         return frame
     }
 
@@ -798,6 +1065,12 @@ class BleRepository(private val context: Context) {
    fun sendCommand(data: ByteArray) {
         if (_connectionState.value != BleConnectionState.CONNECTED) {   Log.d(TAG,"Cannot queue command: Not connected."); return }
         if (writeCharacteristic == null) {   Log.d(TAG,"Cannot queue command: Write Characteristic not available."); return }
+        // Block non-auth commands until authentication completes
+        val isAuthCommand = data.size > 4 && data[4] == CMD_ID_AUTH
+        if (!isAuthCommand && _authState.value != BleAuthState.AUTHENTICATED) {
+            Log.d(TAG, "Cannot queue command: not authenticated (state=${_authState.value}).")
+            return
+        }
         val writeProperty = writeCharacteristic!!.properties
         if (writeProperty and (BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) == 0) {
             Log.d(TAG,"Error: Write characteristic does not support writing."); return
@@ -850,9 +1123,16 @@ class BleRepository(private val context: Context) {
                 val writeType = when {
                     writeCharacteristic!!.properties and BluetoothGattCharacteristic.PROPERTY_WRITE > 0 -> BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                     writeCharacteristic!!.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE > 0 -> BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                    else -> { Log.e(TAG, "processNextCommand: Write characteristic lost write property?"); return@launch }
+                    else -> { Log.e(TAG, "processNextCommand: Write characteristic lost write property?"); isWriting.set(false); return@launch }
                 }
                 Log.d(TAG,"Sending: ${commandToSend!!.toHexString()}")
+                if (commandToSend!!.size > maxWritePayloadSize()) {
+                    Log.w(
+                        TAG,
+                        "Sending ${commandToSend!!.size} bytes with MTU=$negotiatedMtu " +
+                            "(max payload ${maxWritePayloadSize()}). If this write fails, MTU/fragmentation is the first suspect."
+                    )
+                }
                 val success: Boolean = try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         currentGatt?.writeCharacteristic(writeCharacteristic!!, commandToSend!!, writeType) == BluetoothStatusCodes.SUCCESS
@@ -864,8 +1144,14 @@ class BleRepository(private val context: Context) {
                 if (!success) {
                     Log.e(TAG, "writeCharacteristic initiation failed for ${writeCharacteristic!!.uuid}")
                     isWriting.set(false)
-                    processNextCommand() // Try next command immediately
-                } else { Log.d(TAG, "Write initiated for: ${commandToSend!!.toHexString()}. Waiting for callback.") }
+                    processNextCommand()
+                } else {
+                    Log.d(TAG, "Write initiated for: ${commandToSend!!.toHexString()}. Type: ${if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) "DEFAULT" else "NO_RESPONSE"}")
+                    if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
+                        isWriting.set(false)
+                        processNextCommand()
+                    }
+                }
             }
         }
     }
@@ -874,6 +1160,10 @@ class BleRepository(private val context: Context) {
     // This function now directly processes the 55 AA ... FE frame
     private fun processBleNotificationData(data: ByteArray) {
         val rawHexString = data.toHexString()
+        val msSinceWrite = System.currentTimeMillis() - lastWriteTimeMs
+        if (msSinceWrite < 2000) {
+            Log.i(TAG, "AFTER WRITE notify raw ($rawHexString) [${msSinceWrite}ms after write]")
+        }
         Log.d(TAG,"Raw BLE Notify: $rawHexString (Size: ${data.size})")
 
         // --- Frame Assembly Logic ---
@@ -1055,6 +1345,7 @@ class BleRepository(private val context: Context) {
 
         // Log header info AFTER validation
         Log.d(TAG,"Validated Frame Header: Type=0x${rspType.toHexString()} StartPos=$rspStartPos (Actual Payload Size=$actualPayloadSize)")
+        logWriteAckIfPresent(data, payloadData)
 
         // 4. Differentiate Full vs Partial based on Start Position
         if (rspStartPos == 0) {
@@ -1063,9 +1354,26 @@ class BleRepository(private val context: Context) {
             var handled = false
             // Optional: Verify if actual payload size matches expected full size for this type
             val expectedFullSize = EXPECTED_RESPONSE_PAYLOAD_SIZES[rspType]
+
+            // --- Special handling for auth responses ---
+            if (rspType == CMD_ID_AUTH && isAuthFlowRunning) {
+                if (payloadData.size == 4 && authChallenge == null) {
+                    Log.d(TAG, "Auth frame: received challenge (4 bytes)")
+                    handleAuthChallenge(payloadData)
+                    handled = true
+                } else if (payloadData.size <= 4) {
+                    Log.d(TAG, "Auth frame: received certification result, payload=${payloadData.toHexString()}")
+                    handleAuthResult(payloadData)
+                    handled = true
+                } else {
+                    Log.w(TAG, "Auth frame: unexpected payload size ${payloadData.size}")
+                }
+            }
+
             if (expectedFullSize != null && actualPayloadSize != expectedFullSize) {
                 Log.w(TAG,"Warning: Full frame size mismatch! Type=0x${rspType.toHexString()}, Got=$actualPayloadSize, Expected=$expectedFullSize")
-                // Decide whether to proceed with parsing or discard
+                // Don't discard if it was handled (e.g. auth)
+                if (handled) return
             }
 
             when (rspType) {
@@ -1098,29 +1406,50 @@ class BleRepository(private val context: Context) {
                     if (info != null) {
                         _personalizedInfo.value = info // Update StateFlow
                         Log.d(TAG,"Parsed Full Personalized Data: ${info.toString()}") // Use data class toString
+                        logPendingPersonalizedReadback(info)
                     } else {
                         Log.w(TAG,"Failed to parse Full Personalized Info payload (size: $actualPayloadSize).")
                     }
                 }
                 CMD_ID_BATTERY -> {
                     handled = true
-                    // TODO: Create BatteryInfo.kt and call BatteryInfo.parseBatteryInfoPayload(payloadData)
-                    Log.d(TAG,"Received Full Battery Payload: ${payloadData.toHexString()}")
+                    val info = BatteryInfo.parseBatteryInfoPayload(payloadData)
+                    if (info != null) {
+                        _batteryInfo.value = info
+                        Log.d(TAG,"Parsed Full Battery Data: ${info.toString()}")
+                    } else {
+                        Log.w(TAG,"Failed to parse Full Battery Info payload (size: $actualPayloadSize).")
+                    }
                 }
                 CMD_ID_SENSOR -> {
                     handled = true
-                    // TODO: Create SensorInfo.kt and call SensorInfo.parseSensorInfoPayload(payloadData)
-                    Log.d(TAG,("Received Full Sensor Payload: ${payloadData.toHexString()}"))
+                    val info = SensorInfo.parseSensorInfoPayload(payloadData)
+                    if (info != null) {
+                        _sensorInfo.value = info
+                        Log.d(TAG,"Parsed Full Sensor Data: ${info.toString()}")
+                    } else {
+                        Log.w(TAG,"Failed to parse Full Sensor Info payload (size: $actualPayloadSize).")
+                    }
                 }
                 CMD_ID_CONFIG -> { // Assuming this maps to IotConfigInfo
                     handled = true
-                    // TODO: Create IotConfigInfo.kt and call IotConfigInfo.parseIotConfigInfoPayload(payloadData)
-                    Log.d(TAG,("Received Full Config Payload (A1): ${payloadData.toHexString()}"))
+                    val info = IotConfigInfo.parseIotConfigInfoPayload(payloadData)
+                    if (info != null) {
+                        _iotConfigInfo.value = info
+                        Log.d(TAG,"Parsed Full IotConfig Data: ${info.toString()}")
+                    } else {
+                        Log.w(TAG,"Failed to parse Full IotConfig Info payload (size: $actualPayloadSize).")
+                    }
                 }
                 CMD_ID_CAN -> { // Assuming this maps to IotCanInfo
                     handled = true
-                    // TODO: Create IotCanInfo.kt and call IotCanInfo.parseIotCanInfoPayload(payloadData)
-                    Log.d(TAG,("Received Full CAN Payload (A2): ${payloadData.toHexString()}"))
+                    val info = IotCanInfo.parseIotCanInfoPayload(payloadData)
+                    if (info != null) {
+                        _iotCanInfo.value = info
+                        Log.d(TAG,"Parsed Full IotCan Data: ${info.toString()}")
+                    } else {
+                        Log.w(TAG,"Failed to parse Full IotCan Info payload (size: $actualPayloadSize).")
+                    }
                 }
 
                 else -> {  Log.w(TAG,("Received Full Frame with Unknown Type: 0x${rspType.toHexString()}")) }
@@ -1145,8 +1474,7 @@ class BleRepository(private val context: Context) {
                         // Deep copy arrays if necessary, although updatePartial modifies the copy directly
                         gearSpeedLimit = _controllerInfo.value?.gearSpeedLimit?.copyOf() ?: ByteArray(10),
                         gearCurrentLimit = _controllerInfo.value?.gearCurrentLimit?.copyOf() ?: ByteArray(10)
-                        // rawData doesn't need deep copy here as updatePartial doesn't use it
-                    )
+                    )?.also { it.rawData = _controllerInfo.value?.rawData }
 
                     if (currentInfo != null) {
                         // 2. Apply the update to the copy
@@ -1190,7 +1518,25 @@ class BleRepository(private val context: Context) {
                 CMD_ID_PERSONALIZED -> {
                     handled = true
                     Log.d(TAG,"Partial Personalized Data (Start=$rspStartPos, Len=$actualPayloadSize): ${payloadData.toHexString()}")
-                    // TODO: Implement partial update logic for PersonalizedInfo if needed
+
+                    val currentInfo = _personalizedInfo.value?.copy(
+                        motorStartingAngle = _personalizedInfo.value?.motorStartingAngle?.copyOf() ?: ShortArray(10),
+                        accelerationSettings = _personalizedInfo.value?.accelerationSettings?.copyOf() ?: ByteArray(10),
+                        gearSpeedLimit = _personalizedInfo.value?.gearSpeedLimit?.copyOf() ?: ByteArray(10),
+                        gearCurrentLimit = _personalizedInfo.value?.gearCurrentLimit?.copyOf() ?: ByteArray(10)
+                    )
+
+                    if (currentInfo != null) {
+                        val success = currentInfo.updatePartial(payloadData, rspStartPos)
+                        if (success) {
+                            _personalizedInfo.value = currentInfo
+                            Log.d(TAG,"Successfully applied partial update to PersonalizedInfo.")
+                        } else {
+                            Log.w(TAG,"Failed to apply partial update to PersonalizedInfo (offset $rspStartPos).")
+                        }
+                    } else {
+                        Log.w(TAG, "Received partial Personalized update (offset $rspStartPos), but no full data available to update.")
+                    }
                 }
                 // Add cases for other types if partial responses are expected/handled
                 else -> {
@@ -1202,6 +1548,82 @@ class BleRepository(private val context: Context) {
             }
         }
     } // End parseCompleteFrame
+
+    private fun logWriteAckIfPresent(frame: ByteArray, payloadData: ByteArray) {
+        if (frame.size < RSP_MIN_HEADER_SIZE || payloadData.isEmpty()) return
+
+        val command = payloadData[0]
+        if (command != WRITE_INDICATOR && command != CERTIFICATION_INDICATOR) return
+
+        val target = frame[3]
+        val address = if (payloadData.size >= 2) payloadData[1] else frame[6]
+        val result = if (payloadData.size >= 3) payloadData[2].toInt() and 0xFF else payloadData[0].toInt() and 0xFF
+        val operation = when (command) {
+            WRITE_INDICATOR -> "WRITE"
+            CERTIFICATION_INDICATOR -> "CERT"
+            else -> "CMD"
+        }
+        val statusText = if (result == 0) "OK" else "ERROR"
+
+        Log.i(TAG, "WRITE RESPONSE raw: ${frame.toHexString()}")
+        Log.i(TAG, "AA55 $operation ACK: target=0x${target.toHexString()}, address=0x${address.toHexString()}, result=$result ($statusText)")
+
+        if (command == WRITE_INDICATOR && result != 0) {
+            Log.e(TAG, "Write to target=0x${target.toHexString()} was rejected by controller. Result=$result")
+        }
+    }
+
+    private fun logPendingPersonalizedReadback(info: PersonalizedInfo) {
+        val pending = pendingPersonalizedWrite ?: return
+        if (pending.targetType != CMD_ID_PERSONALIZED || pending.startPosition != 0x41.toByte()) return
+
+        val raw = info.rawData
+        if (raw == null || raw.size < 115) {
+            Log.w(TAG, "Cannot compare personalized readback: raw payload missing or too short.")
+            return
+        }
+
+        val actual = raw.sliceArray(65 until 115)
+        val expected = pending.payload
+        val diffs = expected.indices.filter { expected[it] != actual[it] }
+
+        if (diffs.isEmpty()) {
+            Log.i(TAG, "Personalized readback MATCH: controller returned the same 50 bytes that were written.")
+            pendingPersonalizedWrite = null
+        } else {
+            val firstDiffs = diffs.take(12).joinToString(", ") { index ->
+                val offset = 65 + index
+                "0x${String.format("%02X", offset)} exp=${expected[index].toHexString()} got=${actual[index].toHexString()}"
+            }
+            Log.w(
+                TAG,
+                "Personalized readback MISMATCH: ${diffs.size}/50 bytes differ. First diffs: $firstDiffs"
+            )
+            Log.w(TAG, "Expected A9[0x41..0x72]: ${expected.toHexString()}")
+            Log.w(TAG, "Actual   A9[0x41..0x72]: ${actual.toHexString()}")
+        }
+    }
+
+    private fun maxWritePayloadSize(): Int = (negotiatedMtu - 3).coerceAtLeast(20)
+
+    private fun describeProperties(properties: Int): String {
+        val names = mutableListOf<String>()
+        if (properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) names.add("READ")
+        if (properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) names.add("WRITE")
+        if (properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) names.add("WRITE_NO_RESPONSE")
+        if (properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) names.add("NOTIFY")
+        if (properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) names.add("INDICATE")
+        return if (names.isEmpty()) "0x${properties.toString(16)}" else names.joinToString("|")
+    }
+
+    private fun logDiscoveredGatt(gatt: BluetoothGatt) {
+        gatt.services.forEach { service ->
+            Log.d(TAG, "GATT service ${service.uuid}")
+            service.characteristics.forEach { characteristic ->
+                Log.d(TAG, "  characteristic ${characteristic.uuid} props=${describeProperties(characteristic.properties)}")
+            }
+        }
+    }
 
 
     // --- Permissions ---

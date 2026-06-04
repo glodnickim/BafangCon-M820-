@@ -10,39 +10,36 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
-import androidx.fragment.app.activityViewModels // Import activityViewModels
+import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
-import com.test.bafangcon.databinding.FragmentControllerInfoBinding  // Keep using this binding
+import com.test.bafangcon.databinding.FragmentControllerInfoBinding
 import kotlinx.coroutines.launch
 import java.util.*
 import kotlin.collections.ArrayList
 
-// Changed from AppCompatActivity to Fragment
 class ControllerInfoFragment : Fragment() {
 
-    // Standard Fragment binding pattern
     private var _binding: FragmentControllerInfoBinding? = null
     private val binding get() = _binding!!
 
-    // Use activityViewModels to share with RootActivity and other fragments
     private val viewModel: DeviceViewModel by activityViewModels()
     private lateinit var infoAdapter: InfoAdapter
 
-    // Store the list items for the adapter
     private val displayList = ArrayList<InfoItem>()
-    // Store a temporary, editable copy of the ControllerInfo
     private var editableInfo: ControllerInfo? = null
 
     companion object {
-        private const val TAG = "ControllerInfoFragment" // Updated TAG
+        private const val TAG = "ControllerInfoFragment"
         const val KEY_TIRE_CIRCUMFERENCE = "Tire Circumference (mm)"
-        // Define keys for other fields if they become editable
+        const val KEY_MOTOR_ANGLE = "Motor Start Angle (0.1°)"
+        const val KEY_ACCELERATION = "Acceleration Setting"
+        fun keySpeedLimit(index: Int) = "Speed Lv$index"
+        fun keyCurrentLimit(index: Int) = "Current Lv$index"
     }
 
-    // Inflate the layout
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
@@ -51,56 +48,37 @@ class ControllerInfoFragment : Fragment() {
         return binding.root
     }
 
-    // Setup views and observers after the view is created
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        // Set the title via the hosting activity's action bar
-        (activity as? AppCompatActivity)?.supportActionBar?.title = "Controller Information"
-
+        (activity as? AppCompatActivity)?.supportActionBar?.title = "Controller Settings"
         setupRecyclerView()
         setupButtons()
-        observeViewModel() // Start observing data - should now work correctly
+        observeViewModel()
     }
 
     private fun observeViewModel() {
-        Log.d(TAG, "observeViewModel: Setting up observers.")
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                Log.d(TAG, "observeViewModel: Lifecycle STARTED. Collecting ControllerInfo.")
-
-                viewModel.controllerInfo.collect { currentControllerInfoFromVm ->
-                    Log.i(TAG, "Collector Received ControllerInfo from VM: ${currentControllerInfoFromVm.toString().take(100)}...")
-
-                    if (currentControllerInfoFromVm != null) {
-                        // Always re-initialize editableInfo from the ViewModel's current state
-                        editableInfo = currentControllerInfoFromVm.copy(
-                            // Ensure deep copy of mutable arrays if they exist
-                            gearSpeedLimit = currentControllerInfoFromVm.gearSpeedLimit.copyOf(),
-                            gearCurrentLimit = currentControllerInfoFromVm.gearCurrentLimit.copyOf()
-                        )
-                        Log.d(TAG, "Re-initialized editableInfo: ${editableInfo.toString().take(100)}...")
+                viewModel.controllerInfo.collect { current ->
+                    if (current != null) {
+                        editableInfo = current.copy(
+                            gearSpeedLimit = current.gearSpeedLimit.copyOf(),
+                            gearCurrentLimit = current.gearCurrentLimit.copyOf()
+                        ).also { it.rawData = current.rawData }
                         populateList(editableInfo!!)
                     } else {
                         editableInfo = null
                         displayList.clear()
                         infoAdapter.submitList(emptyList())
-                        Log.d(TAG, "ViewModel's ControllerInfo is null. Cleared editableInfo and list.")
                     }
                 }
             }
-            Log.d(TAG, "observeViewModel: repeatOnLifecycle block finished.")
         }
-        Log.d(TAG, "observeViewModel: Coroutine launch call finished.")
     }
-
 
     private fun setupRecyclerView() {
         infoAdapter = InfoAdapter { position, newValue ->
-            if (editableInfo == null) {
-                Log.w(TAG, "Adapter callback: editableInfo is null. Ignoring change.")
-                return@InfoAdapter
-            }
+            if (editableInfo == null) return@InfoAdapter
             if (position >= 0 && position < displayList.size) {
                 val item = displayList[position]
                 item.value = newValue
@@ -123,43 +101,69 @@ class ControllerInfoFragment : Fragment() {
             hideKeyboard()
             if (editableInfo == null) {
                 Toast.makeText(requireContext(), "No data loaded to update", Toast.LENGTH_SHORT).show()
-                Log.e(TAG, "Update clicked but editableInfo is null!")
                 return@setOnClickListener
             }
 
-            val infoToUpdate = editableInfo!! // Shadow with non-null
+            val info = editableInfo!!
+            val raw = info.rawData ?: run {
+                Toast.makeText(requireContext(), "No raw data available", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (raw.size < 237) {
+                Toast.makeText(requireContext(), "Raw data too short", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
             var isValid = true
-            val validationErrors = mutableListOf<String>()
+            val errors = mutableListOf<String>()
 
-            // --- Perform Validation ---
-            val tireCircValue = infoToUpdate.tireCircumference
-            if (tireCircValue < 0 || tireCircValue > 3000) { // Example validation range
-                isValid = false
-                validationErrors.add("Tire Circumference must be 0-3000 mm.")
+            if (info.tireCircumference !in 0..3000) {
+                isValid = false; errors.add("Tire Circ: 0-3000 mm")
             }
-            // Add more validations if other fields become editable
+            if (info.motorStartingAngle !in 0..3600) {
+                isValid = false; errors.add("Motor Angle: 0-3600 (0-360.0°)")
+            }
+            if (info.accelerationSettings !in 0..100) {
+                isValid = false; errors.add("Acceleration: 0-100")
+            }
+            for (i in 0..9) {
+                val speed = info.gearSpeedLimit[i].toInt() and 0xFF
+                if (speed !in 0..100) {
+                    isValid = false; errors.add("Speed Lv$i: 0-100")
+                }
+                val current = info.gearCurrentLimit[i].toInt() and 0xFF
+                if (current !in 0..100) {
+                    isValid = false; errors.add("Current Lv$i: 0-100")
+                }
+            }
 
-            if (isValid) {
-                Log.d(TAG, "Validation passed. Updating Tire Circumference to: ${infoToUpdate.tireCircumference}")
-                viewModel.updateTireCircumference(infoToUpdate.tireCircumference)
-                Toast.makeText(requireContext(), "Update command sent", Toast.LENGTH_SHORT).show()
-                parentFragmentManager.popBackStack()
-            } else {
-                val errorMsg = "Validation failed:\n${validationErrors.joinToString("\n")}"
-                Log.w(TAG, errorMsg)
-                Toast.makeText(requireContext(), errorMsg, Toast.LENGTH_LONG).show()
+            if (!isValid) {
+                Toast.makeText(requireContext(), errors.joinToString("\n"), Toast.LENGTH_LONG).show()
+                return@setOnClickListener
             }
+
+            val modified = raw.copyOf()
+            modified[188] = (info.tireCircumference and 0xFF).toByte()
+            modified[189] = ((info.tireCircumference shr 8) and 0xFF).toByte()
+            modified[211] = (info.motorStartingAngle and 0xFF).toByte()
+            modified[212] = ((info.motorStartingAngle shr 8) and 0xFF).toByte()
+            modified[213] = info.accelerationSettings.toByte()
+            for (i in 0..9) {
+                modified[214 + i] = info.gearSpeedLimit[i]
+                modified[224 + i] = info.gearCurrentLimit[i]
+            }
+
+            val partial = modified.copyOfRange(188, 234) // 46 bytes
+            Log.i(TAG, "Writing controller partial update (46 bytes at offset 188)")
+            viewModel.updateControllerPartial(partial, 188)
+            Toast.makeText(requireContext(), "Wysłano", Toast.LENGTH_SHORT).show()
+            parentFragmentManager.popBackStack()
         }
     }
 
-
-    // Populates the RecyclerView list from the editable PersonalizedInfo object
-    // (Identical to your Activity version, should work fine)
     private fun populateList(info: ControllerInfo) {
-        Log.i(TAG, "populateList: START - Populating with info: $info")
         displayList.clear()
 
-        // Add items in desired order, marking editable ones
         displayList.add(InfoItem("Hardware Version", info.hardVersion))
         displayList.add(InfoItem("Software Version", info.softVersion))
         displayList.add(InfoItem("Model", info.model))
@@ -172,17 +176,15 @@ class ControllerInfoFragment : Fragment() {
         displayList.add(InfoItem("Remaining Mileage (0.01km)", String.format(Locale.US, "%.2f", info.emainingMileage * 0.01)))
         displayList.add(InfoItem("Cadence (RPM)", info.cadence.toString()))
         displayList.add(InfoItem("Moment (mV)", info.moment.toString()))
-        displayList.add(InfoItem("Speed (0.01km/h)", String.format(Locale.US, "%.2f", info.speed * 0.01))) // Check unit/scaling
+        displayList.add(InfoItem("Speed (0.01km/h)", String.format(Locale.US, "%.2f", info.speed * 0.01)))
         displayList.add(InfoItem("Current (0.01A)", String.format(Locale.US, "%.2f", info.electricCurrent * 0.01)))
         displayList.add(InfoItem("Voltage (0.01V)", String.format(Locale.US, "%.2f", info.voltage * 0.01)))
         displayList.add(InfoItem("Controller Temp (°C)", info.controllerTemperature.toString()))
         displayList.add(InfoItem("Motor Temp (°C)", if (info.motorTemperature == 255) "N/A" else info.motorTemperature.toString()))
         displayList.add(InfoItem("Boost State", if (info.boostState == 1) "Active" else "Inactive"))
-        displayList.add(InfoItem("Speed Limit (0.01km/h)", String.format(Locale.US, "%.2f", info.speedLimit * 0.01))) // Check unit/scaling
+        displayList.add(InfoItem("Speed Limit (0.01km/h)", String.format(Locale.US, "%.2f", info.speedLimit * 0.01)))
         displayList.add(InfoItem("Wheel Diameter (raw)", info.wheelDiameter.toString()))
-        // --- Editable Tire Circumference ---
-        displayList.add(InfoItem(KEY_TIRE_CIRCUMFERENCE, info.tireCircumference.toString(), EditableType.EDIT_TEXT_NUMBER, info.tireCircumference))
-        // -----------------------------------
+        displayList.add(InfoItem(KEY_TIRE_CIRCUMFERENCE, info.tireCircumference.toString(), EditableType.EDIT_TEXT_NUMBER))
         displayList.add(InfoItem("Calories (kcal)", info.calories.toString()))
         displayList.add(InfoItem("Current Gear", info.currentGear.toString()))
         displayList.add(InfoItem("Total Gears", info.totalGear.toString()))
@@ -195,64 +197,54 @@ class ControllerInfoFragment : Fragment() {
         displayList.add(InfoItem("Cruise Control", if (info.cruiseControl == 1) "On" else "Off"))
         displayList.add(InfoItem("Boot Default Gear Setting", if (info.bootDefaultGear == 1) "On" else "Off"))
         displayList.add(InfoItem("Boot Default Gear Value", info.bootDefaultGearValue.toString()))
-        displayList.add(InfoItem("Motor Starting Angle (raw)", info.motorStartingAngle.toString()))
-        displayList.add(InfoItem("Acceleration Setting (raw)", info.accelerationSettings.toString()))
-        displayList.add(InfoItem("Gear Speed Limit (raw)", info.gearSpeedLimit.toHexString())) // Use helper
-        displayList.add(InfoItem("Gear Current Limit (raw)", info.gearCurrentLimit.toHexString())) // Use helper
+        displayList.add(InfoItem(KEY_MOTOR_ANGLE, info.motorStartingAngle.toString(), EditableType.EDIT_TEXT_NUMBER))
+        displayList.add(InfoItem(KEY_ACCELERATION, info.accelerationSettings.toString(), EditableType.EDIT_TEXT_NUMBER))
+        for (i in 0..9) {
+            displayList.add(InfoItem(keySpeedLimit(i), (info.gearSpeedLimit[i].toInt() and 0xFF).toString(), EditableType.EDIT_TEXT_NUMBER))
+        }
+        for (i in 0..9) {
+            displayList.add(InfoItem(keyCurrentLimit(i), (info.gearCurrentLimit[i].toInt() and 0xFF).toString(), EditableType.EDIT_TEXT_NUMBER))
+        }
         displayList.add(InfoItem("Buzzer Switch", if (info.buzzerSwitch == 1) "On" else "Off"))
         displayList.add(InfoItem("Protocol Version", info.controllerProtocolVersion.toString()))
 
-        Log.i(TAG, "populateList: Populated displayList with ${displayList.size} items.")
-
-        if (displayList.isNotEmpty() || editableInfo != null) { // Submit even if list is empty to clear recycler
-            infoAdapter.submitList(ArrayList(displayList)) // Submit a copy
-            Log.i(TAG, "populateList: END - Submitted list to adapter.")
-        } else {
-            Log.w(TAG, "populateList: END - displayList is empty and no editableInfo, not submitting.")
-        }
+        infoAdapter.submitList(ArrayList(displayList))
     }
 
     private fun updateEditableInfo(key: String, newValue: String) {
-        if (editableInfo == null) {
-            Log.e(TAG, "updateEditableInfo called but editableInfo is null!")
-            return
-        }
-        Log.d(TAG, "Updating editableInfo: key='$key', newValue='$newValue'")
-
+        if (editableInfo == null) return
         try {
+            val intVal = newValue.toIntOrNull()
+            if (intVal == null) return
+
             when (key) {
-                KEY_TIRE_CIRCUMFERENCE -> {
-                    val intValue = newValue.toIntOrNull()
-                    // Store potentially invalid value; validation happens on Update click
-                    editableInfo?.tireCircumference = intValue ?: editableInfo!!.tireCircumference // Keep old if invalid parse
-                }
-                // Add cases for other editable fields if needed in the future
+                KEY_TIRE_CIRCUMFERENCE -> editableInfo?.tireCircumference = intVal
+                KEY_MOTOR_ANGLE -> editableInfo?.motorStartingAngle = intVal
+                KEY_ACCELERATION -> editableInfo?.accelerationSettings = intVal
             }
-        } catch (e: NumberFormatException) {
-            Log.w(TAG, "Number format error during update for $key: $newValue")
-        }
+            for (i in 0..9) {
+                if (key == keySpeedLimit(i)) {
+                    editableInfo?.gearSpeedLimit?.set(i, intVal.toByte())
+                }
+                if (key == keyCurrentLimit(i)) {
+                    editableInfo?.gearCurrentLimit?.set(i, intVal.toByte())
+                }
+            }
+        } catch (_: NumberFormatException) { }
     }
 
-    // Use requireContext() and requireActivity() in Fragments
     private fun hideKeyboard() {
         val imm = requireContext().getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        val currentFocusView = requireActivity().currentFocus // Get activity's current focus
+        val currentFocusView = requireActivity().currentFocus
         if (currentFocusView != null) {
             imm.hideSoftInputFromWindow(currentFocusView.windowToken, 0)
         } else {
-            // Fallback if no view has focus (less common)
             imm.hideSoftInputFromWindow(binding.root.windowToken, 0)
         }
     }
 
-    // Helper extension (keep as is)
-    private fun ByteArray.toHexString(): String =
-        joinToString(separator = " ") { String.format("%02X", it) }
-
-    // Clean up binding in onDestroyView
     override fun onDestroyView() {
         super.onDestroyView()
-        _binding = null // Important for fragment lifecycle
+        _binding = null
     }
-
-} // End of ControllerInfoFragment class
+}

@@ -6,6 +6,7 @@ import android.os.Build
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -17,11 +18,18 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
 
     val connectionState: StateFlow<BleConnectionState> = bleRepository.connectionState
     val scanResults: StateFlow<Set<DiscoveredBluetoothDevice>> = bleRepository.scanResults
+    val bleLogs: StateFlow<List<String>> = bleRepository.bleLogs
+    val connectionError: StateFlow<String?> = bleRepository.connectionError
 
     // --- Add StateFlows for parsed data ---
     val controllerInfo: StateFlow<ControllerInfo?> = bleRepository.controllerInfo
     val meterInfo: StateFlow<MeterInfo?> = bleRepository.meterInfo
     val personalizedInfo: StateFlow<PersonalizedInfo?> = bleRepository.personalizedInfo
+    val batteryInfo: StateFlow<BatteryInfo?> = bleRepository.batteryInfo
+    val sensorInfo: StateFlow<SensorInfo?> = bleRepository.sensorInfo
+    val iotConfigInfo: StateFlow<IotConfigInfo?> = bleRepository.iotConfigInfo
+    val iotCanInfo: StateFlow<IotCanInfo?> = bleRepository.iotCanInfo
+    val authState: StateFlow<BleAuthState> = bleRepository.authState
 
     // Expose required permissions based on Android version
     val requiredPermissions: List<String>
@@ -53,6 +61,20 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
             bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_PERSONALIZED)
         }
     }
+
+    fun setPersonalizedInfo(info: PersonalizedInfo) {
+        bleRepository.setPersonalizedInfo(info)
+    }
+
+    fun requestPersonalizedInfoFresh() {
+        bleRepository.clearPersonalizedInfo()
+        viewModelScope.launch {
+            Log.d("DeviceViewModel", "Requesting fresh personalized info...")
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_PERSONALIZED)
+        }
+    }
+
+    fun clearBleLogs() { bleRepository.clearBleLogs() }
 
     fun requestBatteryInfo() {
         viewModelScope.launch {
@@ -123,6 +145,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         viewModelScope.launch {
             bleRepository.sendPersonalizedSettings(motorAngles, accelerations, speedLimits, currentLimits)
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_PERSONALIZED)
         }
     }
 
@@ -136,6 +160,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
     fun updateTireCircumference(circumferenceMm: Int) {
         viewModelScope.launch {
             bleRepository.setTireCircumference(circumferenceMm)
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_CONTROLLER)
         }
     }
 
@@ -146,6 +172,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
                 Log.d("DeviceViewModel", "Updating Meter Total Gear to: $gears")
                 // Offset 160, U16
                 bleRepository.sendShortUpdate(BleRepository.CMD_ID_METER, 160.toByte(), gears.toShort())
+                delay(500)
+                bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_METER)
             }
         } else {
             Log.w("DeviceViewModel", "Invalid value for updateMeterTotalGear: $gears")
@@ -158,6 +186,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
             Log.d("DeviceViewModel", "Updating Meter Sport Model to: $model")
             // Offset 162, U8
             bleRepository.sendSingleByteUpdate(BleRepository.CMD_ID_METER, 162.toByte(), model.toByte())
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_METER)
         }
     }
 
@@ -167,6 +197,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
             Log.d("DeviceViewModel", "Updating Meter Boost State to: $state")
             // Offset 163, U8
             bleRepository.sendSingleByteUpdate(BleRepository.CMD_ID_METER, 163.toByte(), state.toByte())
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_METER)
         }
     }
 
@@ -176,6 +208,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
                 Log.d("DeviceViewModel", "Updating Meter Current Gear to: $gear")
                 // Offset 164, U16
                 bleRepository.sendShortUpdate(BleRepository.CMD_ID_METER, 164.toByte(), gear.toShort())
+                delay(500)
+                bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_METER)
             }
         } else {
             Log.w("DeviceViewModel", "Invalid value for updateMeterCurrentGear: $gear")
@@ -188,6 +222,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
             Log.d("DeviceViewModel", "Updating Meter Auto Shutdown to: $minutes")
             // Offset 180, U16
             bleRepository.sendShortUpdate(BleRepository.CMD_ID_METER, 180.toByte(), minutes.toShort())
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_METER)
         }
     }
 
@@ -197,6 +233,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
                 Log.d("DeviceViewModel", "Updating Meter Max Auto Shutdown to: $minutes")
                 // Offset 182, U16
                 bleRepository.sendShortUpdate(BleRepository.CMD_ID_METER, 182.toByte(), minutes.toShort())
+                delay(500)
+                bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_METER)
             }
         } else {
             Log.w("DeviceViewModel", "Invalid value for updateMeterMaxAutoShutdown: $minutes")
@@ -209,6 +247,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
             Log.d("DeviceViewModel", "Updating Meter Unit Switch to: $unit")
             // Offset 184, U16
             bleRepository.sendShortUpdate(BleRepository.CMD_ID_METER, 184.toByte(), unit.toShort())
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_METER)
         }
     }
 
@@ -218,6 +258,52 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
             Log.d("DeviceViewModel", "Updating Meter Light State to: $state")
             // Offset 166, U16 (Even though it's on/off, the field is U16)
             bleRepository.sendShortUpdate(BleRepository.CMD_ID_METER, 166.toByte(), state.toShort())
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_METER)
+        }
+    }
+
+    fun updateControllerFullBlock(modifiedRawData: ByteArray) {
+        viewModelScope.launch {
+            Log.d("DeviceViewModel", "Writing full controller block (${modifiedRawData.size} bytes)")
+            bleRepository.sendControllerFullBlockUpdate(modifiedRawData)
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_CONTROLLER)
+        }
+    }
+
+    fun updateControllerPartial(modifiedPart: ByteArray, startOffset: Int) {
+        viewModelScope.launch {
+            Log.d("DeviceViewModel", "Writing controller partial (${modifiedPart.size} bytes at offset $startOffset)")
+            bleRepository.sendControllerPartialUpdate(startOffset.toByte(), modifiedPart)
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_CONTROLLER)
+        }
+    }
+
+    fun testWriteControllerAcceleration(value: Byte) {
+        viewModelScope.launch {
+            Log.d("DeviceViewModel", "TEST: Writing Controller acceleration byte = $value (full-block read-modify-write)")
+            val raw = controllerInfo.value?.rawData
+            if (raw == null || raw.size < 237) {
+                Log.e("DeviceViewModel", "No rawData available. Read controller data first.")
+                return@launch
+            }
+            val modified = raw.copyOf()
+            modified[213] = value
+            Log.d("DeviceViewModel", "Using saved rawData, modifying byte 213 from 0x${String.format("%02X", raw[213])} to 0x${String.format("%02X", value)}")
+            bleRepository.sendControllerFullBlockUpdate(modified)
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_CONTROLLER)
+        }
+    }
+
+    fun testWritePersonalizedAcceleration(value: Byte) {
+        viewModelScope.launch {
+            Log.d("DeviceViewModel", "TEST: Writing Personalized acceleration[0] byte = $value")
+            bleRepository.sendPersonalizedAccelerationSingleUpdate(value)
+            delay(500)
+            bleRepository.sendReadRequestCommand(BleRepository.CMD_ID_PERSONALIZED)
         }
     }
 

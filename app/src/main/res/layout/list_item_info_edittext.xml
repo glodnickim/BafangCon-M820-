@@ -16,6 +16,8 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_weight="1"
+        android:layout_marginEnd="12dp"
+        android:maxLines="2"
         android:textStyle="bold"
         tools:text="Tire Circumference (mm):" />
 
@@ -23,7 +25,7 @@
         android:id="@+id/item_value_edit"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:minWidth="80dp"
+        android:minWidth="88dp"
         android:inputType="number"
         android:gravity="end"
         android:imeOptions="actionDone"

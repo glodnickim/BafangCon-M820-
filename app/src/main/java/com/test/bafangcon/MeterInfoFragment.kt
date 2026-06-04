@@ -34,12 +34,15 @@ class MeterInfoFragment : Fragment() {
 
     companion object {
         private const val TAG = "MeterInfoFragment"
+        private val gearDisplayValues = mapOf(0 to 0, 2 to 1, 4 to 2, 6 to 3, 8 to 4, 9 to 5)
+        private val gearProtocolValues = mapOf(0 to 0, 1 to 2, 2 to 4, 3 to 6, 4 to 8, 5 to 9)
+
         // Keys for identifying items during edit callback
         const val KEY_LIGHT = "Light Status (On=1)" // Keep existing key
         const val KEY_TOTAL_GEAR = "Total Gears (3-5)"
         const val KEY_SPORT_MODEL = "Sport Mode (On=Sport)" // Switch: On -> 2, Off -> 1
         const val KEY_BOOST_STATE = "Boost Enabled"         // Switch: On -> 1, Off -> 0
-        const val KEY_CURRENT_GEAR = "Current Gear (0-5)"   // EditText (If editable)
+        const val KEY_CURRENT_GEAR = "Current Level (0=E,1=T,2=S,3=S+,4=B)"   // EditText (If editable)
         const val KEY_AUTOSHUTDOWN_ENABLED = "Auto Shutdown Enabled" // Switch: On -> value from Max, Off -> 255
         const val KEY_MAX_AUTOSHUTDOWN = "Max Auto Shutdown Time (0-30 min)" // EditText
         const val KEY_UNIT_SWITCH = "Units (On=MPH)"        // Switch: On -> 1, Off -> 0
@@ -145,7 +148,7 @@ class MeterInfoFragment : Fragment() {
                 KEY_CURRENT_GEAR -> { // If editable
                     val intValue = newValue.toIntOrNull()
                     if (intValue != null) {
-                        editableInfo?.currentGear = intValue
+                        editableInfo?.currentGear = gearProtocolValues[intValue] ?: intValue
                     } else { Log.w(TAG, "Invalid integer format for $key: $newValue") }
                 }
                 KEY_MAX_AUTOSHUTDOWN -> {
@@ -216,8 +219,8 @@ class MeterInfoFragment : Fragment() {
             if (infoToUpdate.totalGear !in MeterInfo.MIN_TOTAL_GEAR..MeterInfo.MAX_TOTAL_GEAR) {
                 isValid = false; validationErrors.add("Total Gears: ${MeterInfo.MIN_TOTAL_GEAR}-${MeterInfo.MAX_TOTAL_GEAR}.")
             }
-            if (infoToUpdate.currentGear !in MeterInfo.MIN_CURRENT_GEAR..MeterInfo.MAX_CURRENT_GEAR) {
-                isValid = false; validationErrors.add("Current Gear: ${MeterInfo.MIN_CURRENT_GEAR}-${MeterInfo.MAX_CURRENT_GEAR}.")
+            if (infoToUpdate.currentGear !in gearDisplayValues) {
+                isValid = false; validationErrors.add("Current Level: 0-5 (E=1,T=2,S=3,S+=4,B=5).")
             }
             if (infoToUpdate.maxAutoShutDown !in MeterInfo.MIN_MAX_AUTOSHUTDOWN..MeterInfo.MAX_MAX_AUTOSHUTDOWN) {
                 isValid = false; validationErrors.add("Max Auto Shutdown: ${MeterInfo.MIN_MAX_AUTOSHUTDOWN}-${MeterInfo.MAX_MAX_AUTOSHUTDOWN} min.")
@@ -277,7 +280,7 @@ class MeterInfoFragment : Fragment() {
         displayList.add(InfoItem(KEY_TOTAL_GEAR, info.totalGear.toString(), EditableType.EDIT_TEXT_NUMBER))
         displayList.add(InfoItem(KEY_SPORT_MODEL, if (info.sportModel == MeterInfo.SPORT_MODEL_SPORT) "1" else "0", EditableType.SWITCH))
         displayList.add(InfoItem(KEY_BOOST_STATE, if (info.boostState == MeterInfo.BOOST_STATE_ON) "1" else "0", EditableType.SWITCH))
-        displayList.add(InfoItem(KEY_CURRENT_GEAR, info.currentGear.toString(), EditableType.EDIT_TEXT_NUMBER)) // If editable
+        displayList.add(InfoItem(KEY_CURRENT_GEAR, (gearDisplayValues[info.currentGear] ?: info.currentGear).toString(), EditableType.EDIT_TEXT_NUMBER)) // If editable
         displayList.add(InfoItem(KEY_LIGHT, info.light.toString(), EditableType.SWITCH)) // Keep light editable
         displayList.add(InfoItem(KEY_AUTOSHUTDOWN_ENABLED, if (info.autoShutDown != MeterInfo.AUTOSHUTDOWN_NEVER) "1" else "0", EditableType.SWITCH))
         displayList.add(InfoItem(KEY_MAX_AUTOSHUTDOWN, info.maxAutoShutDown.toString(), EditableType.EDIT_TEXT_NUMBER))

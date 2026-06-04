@@ -1,10 +1,10 @@
 package com.test.bafangcon
 
-import android.util.Log // Import Log
-import com.test.bafangcon.utils.ByteBufferUtils // Import helpers
+import android.util.Log
+import com.test.bafangcon.utils.ByteBufferUtils
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.BufferUnderflowException // Keep exception import
+import java.nio.BufferUnderflowException
 
 // Based on BfPersonalizedInfo structure
 data class PersonalizedInfo(
@@ -17,68 +17,87 @@ data class PersonalizedInfo(
     var rawData: ByteArray? = null
     // ... (keep existing equals, hashCode, toString, and helper extension)
 ) {
-    companion object {
-        private const val TAG = "PersonalizedInfoParser" // Specific TAG
+    private fun ByteArray.toHexString(): String =
+        joinToString(separator = " ") { String.format("%02X", it) }
 
-        // Moved from BleRepository
+    data class FieldInfo(
+        val name: String,
+        val offset: Int,
+        val size: Int,
+        val parser: (ByteBuffer) -> Any,
+        val updater: (PersonalizedInfo, Any) -> Unit
+    )
+
+    fun updatePartial(partialPayload: ByteArray, startOffset: Int): Boolean {
+        val fieldInfo = fieldOffsetMap[startOffset]
+            ?: run {
+                Log.w(TAG, "updatePartial: No field definition found for offset $startOffset")
+                return false
+            }
+
+        if (partialPayload.size != fieldInfo.size) {
+            Log.w(TAG, "updatePartial: Size mismatch for field '${fieldInfo.name}' at offset $startOffset. Expected ${fieldInfo.size}, got ${partialPayload.size}.")
+            return false
+        }
+
+        return try {
+            val buffer = ByteBuffer.wrap(partialPayload).order(ByteOrder.LITTLE_ENDIAN)
+            val newValue = fieldInfo.parser(buffer)
+            fieldInfo.updater(this, newValue)
+            Log.d(TAG, "updatePartial: Updated field '${fieldInfo.name}' (offset $startOffset)")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "updatePartial: Error parsing/updating field '${fieldInfo.name}' at offset $startOffset: ${e.message}", e)
+            false
+        }
+    }
+
+    companion object {
+        private const val TAG = "PersonalizedInfo"
+
         fun parsePersonalizedInfoPayload(payload: ByteArray): PersonalizedInfo? {
-            // Use BfMeterConfig constant directly
-            // Note: Original code used '<' check. Ensure this is correct.
-            // If exactly 115 bytes are required, use '!='. Let's stick with '<' for now.
             if (payload.size < BfMeterConfig.BfPersonalizedInfo_Total_Size) {
                 Log.w(TAG, "Personalized payload too short: ${payload.size}, expected >= ${BfMeterConfig.BfPersonalizedInfo_Total_Size}")
                 return null
             }
             val info = PersonalizedInfo()
-            info.rawData = payload // Store raw data
+            info.rawData = payload
 
             try {
                 val buffer = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
 
-                // --- Mimic BfPersonalizedInfo.setBuffer logic ---
-                // Skip the first 64 bytes - make sure this is correct!
                 val bytesToSkip = 64
                 if (buffer.remaining() >= bytesToSkip) {
                     buffer.position(buffer.position() + bytesToSkip)
                 } else {
                     Log.w(TAG, "Not enough data to skip initial $bytesToSkip bytes.")
-                    // If skipping fails, the rest of the parsing will likely fail or be incorrect.
-                    // Returning null might be safer here.
                     return null
                 }
 
+                info.controllerProtocolVersion = ByteBufferUtils.getU8(buffer)
 
-                info.controllerProtocolVersion = ByteBufferUtils.getU8(buffer) // Read protocol version
-
-                // Read Motor Starting Angle (20 bytes -> 10 shorts)
                 val motorAngleBytes = ByteArray(20)
                 if (buffer.remaining() >= motorAngleBytes.size) {
                     buffer.get(motorAngleBytes)
                     val angleBuffer = ByteBuffer.wrap(motorAngleBytes).order(ByteOrder.LITTLE_ENDIAN)
                     for (i in 0 until 10) {
-                        // Check remaining before reading each short inside the loop
                         if (angleBuffer.remaining() >= 2) {
-                            info.motorStartingAngle[i] = angleBuffer.short // Read as Short (16-bit)
+                            info.motorStartingAngle[i] = angleBuffer.short
                         } else {
                             Log.w(TAG, "Buffer underflow while reading motor angle index $i")
-                            // Handle error: break, set default, return null? Let's break.
                             break
                         }
                     }
                 } else { Log.w(TAG, "Not enough data for motorStartingAngle array.") }
 
-
-                // Read Acceleration Settings (10 bytes)
                 if (buffer.remaining() >= info.accelerationSettings.size) {
                     buffer.get(info.accelerationSettings)
                 } else { Log.w(TAG, "Not enough data for accelerationSettings array.") }
 
-                // Read Gear Speed Limit (10 bytes)
                 if (buffer.remaining() >= info.gearSpeedLimit.size) {
                     buffer.get(info.gearSpeedLimit)
                 } else { Log.w(TAG, "Not enough data for gearSpeedLimit array.") }
 
-                // Read Gear Current Limit (10 bytes)
                 if (buffer.remaining() >= info.gearCurrentLimit.size) {
                     buffer.get(info.gearCurrentLimit)
                 } else { Log.w(TAG, "Not enough data for gearCurrentLimit array.") }
@@ -94,8 +113,26 @@ data class PersonalizedInfo(
                 return null
             }
         }
+
+        val fieldOffsetMap: Map<Int, FieldInfo> = mapOf(
+            64 to FieldInfo("controllerProtocolVersion", 64, 1,
+                { bb -> ByteBufferUtils.getU8(bb) },
+                { info, v -> info.controllerProtocolVersion = v as Int }),
+            65 to FieldInfo("motorStartingAngle", 65, 20,
+                { bb ->
+                    val raw = ByteArray(20).also { bb.get(it) }
+                    ShortArray(10) { i -> ((raw[i * 2].toInt() and 0xFF) or ((raw[i * 2 + 1].toInt() and 0xFF) shl 8)).toShort() }
+                },
+                { info, v -> info.motorStartingAngle = v as ShortArray }),
+            85 to FieldInfo("accelerationSettings", 85, 10,
+                { bb -> ByteArray(10).also { bb.get(it) } },
+                { info, v -> info.accelerationSettings = v as ByteArray }),
+            95 to FieldInfo("gearSpeedLimit", 95, 10,
+                { bb -> ByteArray(10).also { bb.get(it) } },
+                { info, v -> info.gearSpeedLimit = v as ByteArray }),
+            105 to FieldInfo("gearCurrentLimit", 105, 10,
+                { bb -> ByteArray(10).also { bb.get(it) } },
+                { info, v -> info.gearCurrentLimit = v as ByteArray })
+        )
     }
-    // Helper extension for simple hex string (can be kept here or moved to a general utils file)
-    private fun ByteArray.toHexString(): String =
-        joinToString(separator = " ") { String.format("%02X", it) }
 }

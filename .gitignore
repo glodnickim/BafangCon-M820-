@@ -1,0 +1,13 @@
+.gradle/
+.kotlin/
+.opencode/
+build/
+build-logs/
+**/build/
+
+*.apk
+*.zip
+
+local.properties
+keystore.properties
+*.keystore

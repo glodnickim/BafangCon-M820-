@@ -10,101 +10,112 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
-import androidx.fragment.app.activityViewModels // Import activityViewModels
+import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
-import com.test.bafangcon.databinding.FragmentControllerInfoBinding  // Keep using this binding
+import com.test.bafangcon.databinding.FragmentControllerInfoBinding
 import kotlinx.coroutines.launch
 import kotlin.collections.ArrayList
 
-// Changed from AppCompatActivity to Fragment
 class GearsInfoFragment : Fragment() {
 
-    // Standard Fragment binding pattern
     private var _binding: FragmentControllerInfoBinding ? = null
     private val binding get() = _binding!!
 
-    // Use activityViewModels to share with RootActivity and other fragments
     private val viewModel: DeviceViewModel by activityViewModels()
     private lateinit var infoAdapter: InfoAdapter
 
-    // Store the currently displayed list items
     private val displayList = ArrayList<InfoItem>()
-    // Store a temporary, editable copy of the PersonalizedInfo
     private var editableInfo: PersonalizedInfo? = null
+    private var currentGearCount = 5
+    private var currentGearIndices: IntArray = GEAR_INDICES[5]!!
+    private var currentGearLabels: List<String> = GEAR_LABELS[5]!!
 
-    // Keys for identifying items during edit callback
     companion object {
         const val KEY_PROTOCOL = "Protocol Version"
-        private const val TAG = "GearsInfoFragment" // Updated TAG
-        fun keyAngle(gear: Int) = "Motor Angle Gear ${gear + 1}"
-        fun keyAccel(gear: Int) = "Acceleration Gear ${gear + 1}"
-        fun keySpeed(gear: Int) = "Speed Limit Gear ${gear + 1}"
-        fun keyCurrent(gear: Int) = "Current Limit Gear ${gear + 1}"
+        const val KEY_GLOBAL_ACCEL = "Global Acceleration (s)"
+        private const val TAG = "GearsInfoFragment"
+
+        // Gear index maps: number of gear levels -> which indices in the 10-element array are valid
+        private val GEAR_INDICES = mapOf(
+            3 to intArrayOf(3, 5, 9),
+            4 to intArrayOf(1, 3, 6, 9),
+            5 to intArrayOf(2, 4, 6, 8, 9),
+            9 to intArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9)
+        )
+
+        private val GEAR_LABELS = mapOf(
+            3 to listOf("Eco", "Normal", "Sport"),
+            4 to listOf("Eco", "Tour", "Sport", "Turbo"),
+            5 to listOf("E", "T", "S", "S+", "B"),
+            9 to listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")
+        )
+
+        fun keyAngle(label: String) = "Motor Angle $label"
+        fun keySpeed(label: String) = "Assist Ratio $label"
+        fun keyCurrent(label: String) = "Current Limit $label"
     }
 
-    // Inflate the layout
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        _binding = FragmentControllerInfoBinding .inflate(inflater, container, false)
+        _binding = FragmentControllerInfoBinding.inflate(inflater, container, false)
         return binding.root
     }
 
-    // Setup views and observers after the view is created
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
-        // Set the title via the hosting activity's action bar
         (activity as? AppCompatActivity)?.supportActionBar?.title = "Personalized Gear Settings"
-
         setupRecyclerView()
         setupButtons()
-        observeViewModel() // Start observing data
+        observeViewModel()
     }
 
     private fun observeViewModel() {
-        Log.d(TAG, "observeViewModel: Setting up observers.")
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                Log.d(TAG, "observeViewModel: Lifecycle STARTED. Collecting PersonalizedInfo.")
-
-                viewModel.personalizedInfo.collect { currentPersonalizedInfoFromVm ->
-                    Log.i(TAG, "Collector Received PersonalizedInfo from VM: ${currentPersonalizedInfoFromVm.toString().take(100)}...")
-
-                    if (currentPersonalizedInfoFromVm != null) {
-                        // Always re-initialize editableInfo from the ViewModel's current state
-                        editableInfo = currentPersonalizedInfoFromVm.copy(
-                            // Ensure arrays are copied deeply
-                            motorStartingAngle = currentPersonalizedInfoFromVm.motorStartingAngle.copyOf(),
-                            accelerationSettings = currentPersonalizedInfoFromVm.accelerationSettings.copyOf(),
-                            gearSpeedLimit = currentPersonalizedInfoFromVm.gearSpeedLimit.copyOf(),
-                            gearCurrentLimit = currentPersonalizedInfoFromVm.gearCurrentLimit.copyOf()
-                        )
-                        Log.d(TAG, "Re-initialized editableInfo: ${editableInfo.toString().take(100)}...")
-                        populateList(editableInfo!!)
-                    } else {
-                        editableInfo = null
-                        displayList.clear()
-                        infoAdapter.submitList(emptyList())
-                        Log.d(TAG, "ViewModel's PersonalizedInfo is null. Cleared editableInfo and list.")
+                launch {
+                    viewModel.meterInfo.collect { meter ->
+                        val count = meter?.totalGear ?: 5
+                        if (count in GEAR_INDICES) {
+                            currentGearCount = count
+                            currentGearIndices = GEAR_INDICES[count]!!
+                            currentGearLabels = GEAR_LABELS[count]!!
+                        } else {
+                            currentGearCount = 5
+                            currentGearIndices = GEAR_INDICES[5]!!
+                            currentGearLabels = GEAR_LABELS[5]!!
+                        }
+                        editableInfo?.let { populateList(it) }
+                    }
+                }
+                launch {
+                    viewModel.personalizedInfo.collect { currentPersonalizedInfoFromVm ->
+                        if (currentPersonalizedInfoFromVm != null) {
+                            editableInfo = currentPersonalizedInfoFromVm.copy(
+                                motorStartingAngle = currentPersonalizedInfoFromVm.motorStartingAngle.copyOf(),
+                                accelerationSettings = currentPersonalizedInfoFromVm.accelerationSettings.copyOf(),
+                                gearSpeedLimit = currentPersonalizedInfoFromVm.gearSpeedLimit.copyOf(),
+                                gearCurrentLimit = currentPersonalizedInfoFromVm.gearCurrentLimit.copyOf()
+                            )
+                            populateList(editableInfo!!)
+                        } else {
+                            editableInfo = null
+                            displayList.clear()
+                            infoAdapter.submitList(emptyList())
+                        }
                     }
                 }
             }
-            Log.d(TAG, "observeViewModel: repeatOnLifecycle block finished.")
         }
-        Log.d(TAG, "observeViewModel: Coroutine launch call finished.")
     }
 
     private fun setupRecyclerView() {
         infoAdapter = InfoAdapter { position, newValue ->
-            if (editableInfo == null) {
-                Log.w(TAG, "Adapter callback: editableInfo is null. Ignoring change.")
-                return@InfoAdapter
-            }
+            if (editableInfo == null) return@InfoAdapter
             if (position >= 0 && position < displayList.size) {
                 val item = displayList[position]
                 item.value = newValue
@@ -117,42 +128,48 @@ class GearsInfoFragment : Fragment() {
         }
     }
 
-    // Updates the editableInfo object based on changes from the adapter
     private fun updateEditableInfo(key: String, newValue: String) {
         if (editableInfo == null) {
             Log.e(TAG, "updateEditableInfo called but editableInfo is null!")
             return
         }
-        Log.d(TAG, "Updating editableInfo: key='$key', newValue='$newValue'")
 
         try {
             when {
-                key.startsWith("Motor Angle Gear") -> {
-                    val index = key.removePrefix("Motor Angle Gear ").trim().toIntOrNull()?.minus(1)
-                    val shortValue = newValue.toShortOrNull()
-                    if (index != null && index in editableInfo!!.motorStartingAngle.indices) {
-                        editableInfo?.motorStartingAngle?.set(index, shortValue ?: editableInfo!!.motorStartingAngle[index])
-                    } else { Log.w(TAG, "Invalid index or value for $key") }
-                }
-                key.startsWith("Acceleration Gear") -> {
-                    val index = key.removePrefix("Acceleration Gear ").trim().toIntOrNull()?.minus(1)
+                key == KEY_GLOBAL_ACCEL -> {
                     val byteValue = newValue.toIntOrNull()?.coerceIn(0, 255)?.toByte()
-                    if (index != null && index in editableInfo!!.accelerationSettings.indices) {
-                        editableInfo?.accelerationSettings?.set(index, byteValue ?: editableInfo!!.accelerationSettings[index])
+                    if (byteValue != null) {
+                        editableInfo?.accelerationSettings?.set(0, byteValue)
+                        for (i in 1 until 10) {
+                            editableInfo?.accelerationSettings?.set(i, 0.toByte())
+                        }
+                    }
+                }
+                key.startsWith("Motor Angle") -> {
+                    val label = key.removePrefix("Motor Angle ").trim()
+                    val uiIndex = currentGearLabels.indexOf(label)
+                    val shortValue = newValue.toShortOrNull()
+                    if (uiIndex != -1 && uiIndex < currentGearIndices.size && shortValue != null) {
+                        val arrayIndex = currentGearIndices[uiIndex]
+                        editableInfo?.motorStartingAngle?.set(arrayIndex, shortValue)
                     } else { Log.w(TAG, "Invalid index or value for $key") }
                 }
-                key.startsWith("Speed Limit Gear") -> {
-                    val index = key.removePrefix("Speed Limit Gear ").removeSuffix(" (%)").trim().toIntOrNull()?.minus(1)
-                    val byteValue = newValue.toIntOrNull()?.coerceIn(0, 100)?.toByte() // 0-100%
-                    if (index != null && index in editableInfo!!.gearSpeedLimit.indices) {
-                        editableInfo?.gearSpeedLimit?.set(index, byteValue ?: editableInfo!!.gearSpeedLimit[index])
+                key.startsWith("Assist Ratio") -> {
+                    val label = key.removePrefix("Assist Ratio ").trim()
+                    val uiIndex = currentGearLabels.indexOf(label)
+                    val byteValue = newValue.toIntOrNull()?.coerceIn(0, 100)?.toByte()
+                    if (uiIndex != -1 && uiIndex < currentGearIndices.size && byteValue != null) {
+                        val arrayIndex = currentGearIndices[uiIndex]
+                        editableInfo?.gearSpeedLimit?.set(arrayIndex, byteValue)
                     } else { Log.w(TAG, "Invalid index or value for $key") }
                 }
-                key.startsWith("Current Limit Gear") -> {
-                    val index = key.removePrefix("Current Limit Gear ").removeSuffix(" (%)").trim().toIntOrNull()?.minus(1)
-                    val byteValue = newValue.toIntOrNull()?.coerceIn(0, 100)?.toByte() // 0-100%
-                    if (index != null && index in editableInfo!!.gearCurrentLimit.indices) {
-                        editableInfo?.gearCurrentLimit?.set(index, byteValue ?: editableInfo!!.gearCurrentLimit[index])
+                key.startsWith("Current Limit") -> {
+                    val label = key.removePrefix("Current Limit ").trim()
+                    val uiIndex = currentGearLabels.indexOf(label)
+                    val byteValue = newValue.toIntOrNull()?.coerceIn(0, 100)?.toByte()
+                    if (uiIndex != -1 && uiIndex < currentGearIndices.size && byteValue != null) {
+                        val arrayIndex = currentGearIndices[uiIndex]
+                        editableInfo?.gearCurrentLimit?.set(arrayIndex, byteValue)
                     } else { Log.w(TAG, "Invalid index or value for $key") }
                 }
             }
@@ -171,51 +188,59 @@ class GearsInfoFragment : Fragment() {
             hideKeyboard()
             if (editableInfo == null) {
                 Toast.makeText(requireContext(), "No data to update", Toast.LENGTH_SHORT).show()
-                Log.e(TAG, "Update clicked but editableInfo is null!")
                 return@setOnClickListener
             }
 
-            val infoToUpdate = editableInfo!! // Shadow with non-null
+            val infoToUpdate = editableInfo!!
             var isValid = true
             val validationErrors = mutableListOf<String>()
 
-            // --- Perform Validation ---
-            infoToUpdate.motorStartingAngle.forEachIndexed { index, value ->
-                if (value !in 0..3600) { // Example range (0-360.0 degrees, stored as value*10)
+            for (uiIndex in currentGearIndices.indices) {
+                val arrayIndex = currentGearIndices[uiIndex]
+                val label = currentGearLabels.getOrElse(uiIndex) { "Lv${uiIndex + 1}" }
+                val angle = infoToUpdate.motorStartingAngle.getOrElse(arrayIndex) { 0 }
+                if (angle !in 0..3600) {
                     isValid = false
-                    validationErrors.add("Angle Gear ${index + 1} must be 0-3600 (0-360.0°).")
+                    validationErrors.add("Angle $label must be 0-3600 (0-360.0°).")
+                }
+                val speed = infoToUpdate.gearSpeedLimit.getOrElse(arrayIndex) { 0 }.toInt() and 0xFF
+                if (speed !in 0..100) {
+                    isValid = false
+                    validationErrors.add("Assist Ratio $label must be 0-100%.")
+                }
+                val current = infoToUpdate.gearCurrentLimit.getOrElse(arrayIndex) { 0 }.toInt() and 0xFF
+                if (current !in 0..100) {
+                    isValid = false
+                    validationErrors.add("Current Limit $label must be 0-100%.")
                 }
             }
-            infoToUpdate.accelerationSettings.forEachIndexed { index, value ->
-                // Assuming 1-10 is a valid range for acceleration settings (e.g. levels)
-                if ((value.toInt() and 0xFF) !in 0..100) { // Example: 1-100 as a general byte range
-                    isValid = false
-                    validationErrors.add("Accel Gear ${index + 1} must be 0-100.")
-                }
+            val globalAccel = infoToUpdate.accelerationSettings.getOrElse(0) { 0 }.toInt() and 0xFF
+            if (globalAccel !in 0..100) {
+                isValid = false
+                validationErrors.add("Global Acceleration must be 0-100.")
             }
-            infoToUpdate.gearSpeedLimit.forEachIndexed { index, value ->
-                if ((value.toInt() and 0xFF) !in 0..100) { // 0-100%
-                    isValid = false
-                    validationErrors.add("Speed Limit Gear ${index + 1} must be 0-100%.")
-                }
-            }
-            infoToUpdate.gearCurrentLimit.forEachIndexed { index, value ->
-                if ((value.toInt() and 0xFF) !in 0..100) { // 0-100%
-                    isValid = false
-                    validationErrors.add("Current Limit Gear ${index + 1} must be 0-100%.")
-                }
-            }
-            // --- End Validation ---
 
             if (isValid) {
-                Log.d(TAG, "Validation passed. Sending updated personalized settings: ${infoToUpdate.toString().take(100)}...")
-                viewModel.sendPersonalizedSettings(
-                    infoToUpdate.motorStartingAngle,
-                    infoToUpdate.accelerationSettings,
-                    infoToUpdate.gearSpeedLimit,
-                    infoToUpdate.gearCurrentLimit
-                )
-                Toast.makeText(requireContext(), "Update command sent", Toast.LENGTH_SHORT).show()
+                val raw = viewModel.controllerInfo.value?.rawData?.copyOf()
+                if (raw == null || raw.size < 237) {
+                    Toast.makeText(requireContext(), "No Controller data. Press Controller button first.", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+
+                val angleIdx = if (currentGearIndices.isNotEmpty()) currentGearIndices[0] else 0
+                val angle = infoToUpdate.motorStartingAngle.getOrElse(angleIdx) { 0 }.toInt() and 0xFFFF
+                raw[211] = (angle and 0xFF).toByte()
+                raw[212] = ((angle shr 8) and 0xFF).toByte()
+                raw[213] = infoToUpdate.accelerationSettings.getOrElse(0) { 0 }
+                for (i in 0..9) {
+                    raw[214 + i] = infoToUpdate.gearSpeedLimit.getOrElse(i) { 0 }
+                    raw[224 + i] = infoToUpdate.gearCurrentLimit.getOrElse(i) { 0 }
+                }
+
+                val partial = raw.copyOfRange(188, 234) // 46 bytes
+                Log.i(TAG, "Writing Gears settings through A3 partial (46 bytes at offset 188)")
+                viewModel.updateControllerPartial(partial, 188)
+                Toast.makeText(requireContext(), "Wysłano", Toast.LENGTH_SHORT).show()
                 parentFragmentManager.popBackStack()
             } else {
                 val errorMsg = "Validation failed:\n${validationErrors.joinToString("\n")}"
@@ -225,26 +250,25 @@ class GearsInfoFragment : Fragment() {
         }
     }
 
-    // Populates the RecyclerView list from the PersonalizedInfo object
     private fun populateList(info: PersonalizedInfo) {
-        Log.i(TAG, "populateList: START - Populating with info: ${info.toString().take(100)}...")
         displayList.clear()
 
-        displayList.add(InfoItem(KEY_PROTOCOL, info.controllerProtocolVersion.toString())) // Display only
+        displayList.add(InfoItem(KEY_PROTOCOL, info.controllerProtocolVersion.toString()))
+        displayList.add(InfoItem(KEY_GLOBAL_ACCEL,
+            (info.accelerationSettings.getOrElse(0) { 0 }.toInt() and 0xFF).toString(),
+            EditableType.EDIT_TEXT_NUMBER))
 
-        for (i in 0 until 10) { // Assuming 10 gears for all settings
-            displayList.add(InfoItem(keyAngle(i), info.motorStartingAngle.getOrElse(i) { 0 }.toString(), EditableType.EDIT_TEXT_NUMBER))
-            displayList.add(InfoItem(keyAccel(i), (info.accelerationSettings.getOrElse(i) { 0 }.toInt() and 0xFF).toString(), EditableType.EDIT_TEXT_NUMBER))
-            displayList.add(InfoItem(keySpeed(i), (info.gearSpeedLimit.getOrElse(i) { 0 }.toInt() and 0xFF).toString(), EditableType.EDIT_TEXT_NUMBER))
-            displayList.add(InfoItem(keyCurrent(i), (info.gearCurrentLimit.getOrElse(i) { 0 }.toInt() and 0xFF).toString(), EditableType.EDIT_TEXT_NUMBER))
+        for (uiIndex in currentGearIndices.indices) {
+            val arrayIndex = currentGearIndices[uiIndex]
+            val label = currentGearLabels.getOrElse(uiIndex) { "Lv${uiIndex + 1}" }
+            displayList.add(InfoItem(keyAngle(label), info.motorStartingAngle.getOrElse(arrayIndex) { 0 }.toString(), EditableType.EDIT_TEXT_NUMBER))
+            displayList.add(InfoItem(keySpeed(label), (info.gearSpeedLimit.getOrElse(arrayIndex) { 0 }.toInt() and 0xFF).toString(), EditableType.EDIT_TEXT_NUMBER))
+            displayList.add(InfoItem(keyCurrent(label), (info.gearCurrentLimit.getOrElse(arrayIndex) { 0 }.toInt() and 0xFF).toString(), EditableType.EDIT_TEXT_NUMBER))
         }
 
-        Log.i(TAG, "populateList: Populated displayList with ${displayList.size} items.")
-        infoAdapter.submitList(ArrayList(displayList)) // Submit a copy
-        Log.i(TAG, "populateList: END - Submitted list to adapter.")
+        infoAdapter.submitList(ArrayList(displayList))
     }
 
-    // Use requireContext() and requireActivity() in Fragments
     private fun hideKeyboard() {
         val imm = requireContext().getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         val currentFocusView = requireActivity().currentFocus
@@ -255,10 +279,9 @@ class GearsInfoFragment : Fragment() {
         }
     }
 
-    // Clean up binding in onDestroyView
     override fun onDestroyView() {
         super.onDestroyView()
-        _binding = null // Important for fragment lifecycle
+        _binding = null
     }
 
-} // End of GearsInfoFragment class
+}

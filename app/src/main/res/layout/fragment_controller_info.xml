@@ -5,6 +5,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/screen_background"
     tools:context="com.test.bafangcon.ControllerInfoFragment">
 
     <androidx.recyclerview.widget.RecyclerView
@@ -20,14 +21,27 @@
 
     <LinearLayout
         android:id="@+id/buttonLayout"
+        style="?android:attr/buttonBarStyle"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:background="@color/surface_panel"
         android:orientation="horizontal"
-        android:padding="8dp"
-        style="?android:attr/buttonBarStyle"
+        android:paddingStart="12dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="8dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
+
+        <Button
+            android:id="@+id/assistButton"
+            style="?android:attr/buttonBarButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="4dp"
+            android:layout_weight="1"
+            android:text="@string/assist" />
 
         <Button
             android:id="@+id/cancelButton"
@@ -35,6 +49,7 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:layout_marginStart="4dp"
             android:layout_marginEnd="4dp"
             android:text="@android:string/cancel" />
 
@@ -45,7 +60,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginStart="4dp"
-            android:text="Update" />
+            android:text="@string/update" />
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

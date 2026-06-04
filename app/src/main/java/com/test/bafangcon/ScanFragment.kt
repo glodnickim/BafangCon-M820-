@@ -1,13 +1,17 @@
 package com.test.bafangcon
 
 import android.content.pm.PackageManager
+import androidx.appcompat.app.AlertDialog
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
@@ -28,6 +32,8 @@ class ScanFragment : Fragment() {
     // Use activityViewModels to share the ViewModel with MainActivity/RootActivity
     private val viewModel: DeviceViewModel by activityViewModels()
     private lateinit var deviceScanAdapter: DeviceScanAdapter
+    private lateinit var devicePrefs: DevicePreferences
+    private var autoConnectAttempted = false
 
     // Permission Launcher
     private val requestPermissionsLauncher =
@@ -53,12 +59,57 @@ class ScanFragment : Fragment() {
         return binding.root
     }
 
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        devicePrefs = DevicePreferences(requireContext())
+    }
+
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        setupSystemBarInsets()
         setupRecyclerView()
         setupListeners()
         observeViewModel()
+
+        // Auto-start scan if we have a saved device (silent — no permission dialog)
+        if (devicePrefs.lastDeviceAddress != null) {
+            val missingPermissions = viewModel.requiredPermissions.filter {
+                ContextCompat.checkSelfPermission(requireContext(), it) != PackageManager.PERMISSION_GRANTED
+            }
+            if (missingPermissions.isEmpty()) {
+                viewModel.startScan()
+            }
+        }
+    }
+
+    private fun setupSystemBarInsets() {
+        val headerStart = binding.scanHeaderLayout.paddingStart
+        val headerTop = binding.scanHeaderLayout.paddingTop
+        val headerEnd = binding.scanHeaderLayout.paddingEnd
+        val headerBottom = binding.scanHeaderLayout.paddingBottom
+        val actionStart = binding.scanActionLayout.paddingStart
+        val actionTop = binding.scanActionLayout.paddingTop
+        val actionEnd = binding.scanActionLayout.paddingEnd
+        val actionBottom = binding.scanActionLayout.paddingBottom
+
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            binding.scanHeaderLayout.setPadding(
+                headerStart,
+                headerTop + systemBars.top,
+                headerEnd,
+                headerBottom
+            )
+            binding.scanActionLayout.setPadding(
+                actionStart,
+                actionTop,
+                actionEnd,
+                actionBottom + systemBars.bottom
+            )
+            insets
+        }
+        ViewCompat.requestApplyInsets(binding.root)
     }
 
     override fun onResume() {
@@ -102,12 +153,7 @@ class ScanFragment : Fragment() {
 
     private fun setupRecyclerView() {
         deviceScanAdapter = DeviceScanAdapter { device ->
-            // User selected a device
-            if (viewModel.connectionState.value == BleConnectionState.SCANNING) {
-                viewModel.stopScan() // Stop scanning before attempting connection
-            }
-            viewModel.connect(device)
-            // Status update (CONNECTING) will be handled by observing connectionState
+            connectToDevice(device)
         }
         binding.scanRecyclerView.apply {
             adapter = deviceScanAdapter
@@ -120,6 +166,13 @@ class ScanFragment : Fragment() {
     }
 
     private fun setupListeners() {
+        binding.scanInfoButton.setOnClickListener {
+            AlertDialog.Builder(requireContext())
+                .setTitle(R.string.disclaimer_title)
+                .setMessage(R.string.disclaimer_message)
+                .setPositiveButton("OK", null)
+                .show()
+        }
         binding.scanButton.setOnClickListener {
             when (viewModel.connectionState.value) {
                 BleConnectionState.SCANNING -> {
@@ -136,6 +189,17 @@ class ScanFragment : Fragment() {
                 }
             }
         }
+
+    }
+
+    private fun connectToDevice(device: DiscoveredBluetoothDevice) {
+        devicePrefs.lastDeviceAddress = device.address
+        devicePrefs.lastDeviceName = device.name
+        Log.d("ScanFragment", "Saved device: ${device.name} (${device.address})")
+        if (viewModel.connectionState.value == BleConnectionState.SCANNING) {
+            viewModel.stopScan()
+        }
+        viewModel.connect(device)
     }
 
     private fun observeViewModel() {
@@ -146,8 +210,20 @@ class ScanFragment : Fragment() {
                 // Observe Scan Results
                 launch {
                     viewModel.scanResults.collect { results ->
-                        // Update the adapter's list
-                        deviceScanAdapter.submitList(results.toList().sortedByDescending { it.rssi })
+                        val filtered = results.filter { !it.name.isNullOrBlank() && it.name!!.startsWith("DP") }
+                        deviceScanAdapter.submitList(filtered.sortedByDescending { it.rssi })
+
+                        if (!autoConnectAttempted && viewModel.connectionState.value == BleConnectionState.SCANNING) {
+                            val savedAddress = devicePrefs.lastDeviceAddress
+                            if (savedAddress != null) {
+                                val match = filtered.find { it.address == savedAddress }
+                                if (match != null) {
+                                    Log.d("ScanFragment", "Auto-connecting to saved device: ${match.name} ($savedAddress)")
+                                    autoConnectAttempted = true
+                                    connectToDevice(match)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -160,16 +236,17 @@ class ScanFragment : Fragment() {
                         if (state == BleConnectionState.CONNECTED) {
                             Log.d("ScanFragment", "Connection successful, navigating to MainFragment.")
                             (activity as? RootActivity)?.navigateToMainFragment()
+                        } else if (state == BleConnectionState.DISCONNECTED) {
+                            // Reset auto-connect flag when we return to scan screen
+                            autoConnectAttempted = false
                         }
-                        // Optionally show a persistent error message if connection fails *after* trying
-                        else if (state == BleConnectionState.FAILED) {
-                            // Check if we were previously in CONNECTING state to avoid showing
-                            // this error just because the initial state might be FAILED.
-                            // This requires more complex state tracking, maybe in ViewModel.
-                            // For now, a simple Toast might suffice, but could be annoying.
-                            // Consider showing it only if the user explicitly tried to connect.
-                            // Toast.makeText(context, R.string.connection_failed, Toast.LENGTH_SHORT).show()
-                            Log.w("ScanFragment", "Connection state is FAILED.")
+                    }
+                }
+                // Observe connection errors
+                launch {
+                    viewModel.connectionError.collect { error ->
+                        if (error != null) {
+                            Toast.makeText(requireContext(), error, Toast.LENGTH_LONG).show()
                         }
                     }
                 }
@@ -180,7 +257,8 @@ class ScanFragment : Fragment() {
     // Updates the Scan Button text, ProgressBar visibility based on state
     private fun updateUiState(state: BleConnectionState) {
         binding.scanProgressBar.isVisible = state == BleConnectionState.SCANNING || state == BleConnectionState.CONNECTING
-        binding.scanButton.text = getString(if (state == BleConnectionState.SCANNING) R.string.scan_stop else R.string.scan_start)
+        binding.scanLogo.isVisible = state != BleConnectionState.SCANNING
+        binding.scanButton.text = getString(R.string.scan_start)
         // Disable scan button AND recyclerview interaction while connecting
         val isConnecting = state == BleConnectionState.CONNECTING
         binding.scanButton.isEnabled = !isConnecting
@@ -193,6 +271,10 @@ class ScanFragment : Fragment() {
             BleConnectionState.DISCONNECTED -> getString(R.string.scan_stopped) // Or "Ready to Scan"
             BleConnectionState.CONNECTED -> getString(R.string.connected) // Should navigate away
             BleConnectionState.FAILED -> getString(R.string.connection_failed) // Indicate failure clearly
+        }
+        // Show error text on FAILED
+        if (state == BleConnectionState.FAILED) {
+            binding.scanStatusText.text = getString(R.string.connection_failed)
         }
         // Hide status text if disconnected and no results yet
         if(state == BleConnectionState.DISCONNECTED && deviceScanAdapter.itemCount == 0) {
