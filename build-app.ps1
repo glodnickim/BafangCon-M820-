@@ -181,8 +181,13 @@ function Invoke-GradleTasks {
 
         Write-Section "Result"
         # Re-resolve APK after build (if it was just created)
-        $builtApk = Resolve-Apk $DebugApkDir
-        if (-not $builtApk) { $builtApk = Resolve-Apk $ReleaseApkDir }
+        if ($Mode -eq "release") {
+            $builtApk = Resolve-Apk $ReleaseApkDir
+            if (-not $builtApk) { $builtApk = Resolve-Apk $DebugApkDir }
+        } else {
+            $builtApk = Resolve-Apk $DebugApkDir
+            if (-not $builtApk) { $builtApk = Resolve-Apk $ReleaseApkDir }
+        }
 
         if ($builtApk) {
             Write-Host "APK ready: $builtApk" -ForegroundColor Green

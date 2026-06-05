@@ -1,35 +1,96 @@
 # Changelog
 
-## 2026-05-29 — Autoryzacja AES, poprawki protokołu, mapowanie poziomów
+All notable user-visible changes should be written here.
 
-### Dodane
+Use this format:
 
-- **`utils/AESUtils.kt`** — szyfrowanie AES/ECB/NoPadding kluczem `2CTDU40qNyCgTjb1`
-- **`BleAuthState`** w `Constants.kt` — `NOT_AUTHENTICATED`, `AUTHENTICATING`, `AUTHENTICATED`, `AUTH_FAILED`
-- **Flow autoryzacji** w `BleRepository.kt`:
-  1. `meterRead(0x10, 0x00, 4)` — pobranie 4 bajtów losowych
-  2. AES/ECB/NoPadding (dopełnienie zerami do 16 bajtów)
-  3. `certification(0x10, 0x00, encrypted16)` — komenda 0x20
-  4. `handleAuthResult()` — sprawdzenie RESULT == 0
-- **`requestMtu(250)`** — po włączeniu notyfikacji
-- **Widoczny status autoryzacji** w `MainFragment` + blokada przycisków przed auth
-- **Obsługa konfiguracji 3, 4, 5, 9 poziomów** w `GearsInfoFragment` — automatyczne mapowanie na podstawie `meterInfo.totalGear`
+```md
+## vX.XXX - YYYY-MM-DD
 
-### Zmienione
+### Added
+- ...
 
-- **`createReadRequestFrame`** — 2-bajtowa suma kontrolna AA55Pack (`(~sum) & 0xFFFF`) zamiast 1-bajtowej + FE/FF
-- **`createWriteRequestFrame`** — zawsze 2-bajtowa suma AA55Pack (usunięto specjalny przypadek dla 1-bajtowych payloadów)
-- **`onDescriptorWrite`** — po włączeniu notyfikacji uruchamia autoryzację i żądanie MTU
-- **`parseCompleteFrame`** — obsługa odpowiedzi autoryzacji (`rspType == 0x10`)
-- **`handleDisconnectOrFailure`** — reset stanu autoryzacji
-- **`GearsInfoFragment`** — indeksy tablic dostosowane do mapowania z analizy Bafang Go:
-  - 3 poziomy: indeksy `[3, 5, 9]`
-  - 4 poziomy: indeksy `[1, 3, 6, 9]`
-  - 5 poziomów: indeksy `[2, 4, 6, 8, 9]` (było `[0, 1, 2, 3, 4]`)
-  - 9 poziomów: indeksy `[1, 2, 3, 4, 5, 6, 7, 8, 9]`
-- **`fragment_main.xml`** — dodano `authStatusTextView`
-- **`DeviceViewModel.kt`** — eksport `authState`
+### Changed
+- ...
 
-### Usunięte
+### Fixed
+- ...
 
-- Nieużywane stałe `FRAME_END_BYTE_FE`, `FRAME_END_BYTE_FF`, `WRITE_FRAME_END_BYTE` w `BleRepository.kt`
+### Known Issues
+- ...
+```
+
+## Unreleased
+
+### Added
+- Nothing yet.
+
+### Changed
+- Nothing yet.
+
+### Fixed
+- Nothing yet.
+
+## v0.039 - 2026-06-05
+
+### Changed
+- Pressing `Log` now always opens Android folder picker before starting a new
+  CSV log.
+- Removed automatic reuse of a previously selected log folder so the user always
+  chooses where the next file will be saved.
+
+## v0.038 - 2026-06-05
+
+### Added
+- Added ride logging to CSV.
+- Added Android folder picker before starting ride logging.
+- Saved the selected log folder permission for later rides.
+- CSV log now includes speed, current, voltage, calculated power, controller SOC,
+  assist level, cadence, torque raw value, temperatures, boost state, speed limit,
+  wheel/crank counters and raw A3 telemetry bytes.
+- CSV log also includes last known battery SOC, voltage, current, power and
+  temperature from A4 when available.
+
+### Changed
+- Ride logs are no longer written to a default app directory.
+- Pressing `Log` without a saved folder opens the system folder selection window.
+- A3 telemetry segment `160..207` is parsed as a live telemetry block and updates
+  controller data in the app.
+
+### Fixed
+- Partial A3 telemetry frames are no longer rejected by the old single-field
+  partial update parser.
+
+### Known Issues
+- Battery A4 values in the CSV are the last known battery readout, not guaranteed
+  to be refreshed every second.
+
+## v0.037 - 2026-06-05
+
+### Added
+- Added first version of ride telemetry logging.
+- Added CSV sample model for A3 telemetry.
+- Added Log/Stop button in the main bottom bar.
+
+### Changed
+- Full A3 controller reads can be converted to telemetry samples.
+
+## v0.036 - 2026-06-05
+
+### Fixed
+- Improved connection/authentication flow for Android 12 devices.
+- Main screen now waits for authenticated connection before requesting data.
+- Added authentication timeout and MTU/auth fallback handling.
+
+## 2026-05-29
+
+### Added
+- Added AES/ECB/NoPadding authentication with key `2CTDU40qNyCgTjb1`.
+- Added `BleAuthState`.
+- Added MTU request after enabling notifications.
+- Added visible authentication state in the main flow.
+- Added mapping for 3, 4, 5 and 9 assist levels.
+
+### Changed
+- Updated AA55 read/write checksum handling.
+- Reset authentication state on disconnect.

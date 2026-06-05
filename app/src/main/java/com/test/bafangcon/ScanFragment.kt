@@ -22,6 +22,7 @@ import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.snackbar.Snackbar
 import com.test.bafangcon.databinding.FragmentScanBinding
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class ScanFragment : Fragment() {
@@ -183,6 +184,9 @@ class ScanFragment : Fragment() {
                     // Should not happen as button is disabled, but good practice
                     Log.d("ScanFragment", "Scan button clicked while connecting, ignoring.")
                 }
+                BleConnectionState.CONNECTED -> {
+                    viewModel.disconnect()
+                }
                 else -> {
                     // If disconnected or failed, check permissions and start scan
                     checkRequiredPermissions(showAlertAndRequest = true)
@@ -229,12 +233,14 @@ class ScanFragment : Fragment() {
 
                 // Observe Connection State for UI updates and navigation
                 launch {
-                    viewModel.connectionState.collect { state ->
-                        updateUiState(state) // Update button text, progress bar visibility etc.
+                    combine(viewModel.connectionState, viewModel.authState) { state, authState ->
+                        state to authState
+                    }.collect { (state, authState) ->
+                        updateUiState(state, authState) // Update button text, progress bar visibility etc.
 
-                        // Navigate only when connection is fully established
-                        if (state == BleConnectionState.CONNECTED) {
-                            Log.d("ScanFragment", "Connection successful, navigating to MainFragment.")
+                        // Navigate only when BLE and protocol authentication are ready.
+                        if (state == BleConnectionState.CONNECTED && authState == BleAuthState.AUTHENTICATED) {
+                            Log.d("ScanFragment", "Authentication successful, navigating to MainFragment.")
                             (activity as? RootActivity)?.navigateToMainFragment()
                         } else if (state == BleConnectionState.DISCONNECTED) {
                             // Reset auto-connect flag when we return to scan screen
@@ -255,22 +261,35 @@ class ScanFragment : Fragment() {
     }
 
     // Updates the Scan Button text, ProgressBar visibility based on state
-    private fun updateUiState(state: BleConnectionState) {
-        binding.scanProgressBar.isVisible = state == BleConnectionState.SCANNING || state == BleConnectionState.CONNECTING
+    private fun updateUiState(
+        state: BleConnectionState,
+        authState: BleAuthState = viewModel.authState.value
+    ) {
+        val isAuthenticating = state == BleConnectionState.CONNECTED && authState == BleAuthState.AUTHENTICATING
+        binding.scanProgressBar.isVisible = state == BleConnectionState.SCANNING || state == BleConnectionState.CONNECTING || isAuthenticating
         binding.scanLogo.isVisible = state != BleConnectionState.SCANNING
-        binding.scanButton.text = getString(R.string.scan_start)
+        binding.scanButton.text = if (state == BleConnectionState.CONNECTED) {
+            getString(R.string.disconnect)
+        } else {
+            getString(R.string.scan_start)
+        }
         // Disable scan button AND recyclerview interaction while connecting
-        val isConnecting = state == BleConnectionState.CONNECTING
-        binding.scanButton.isEnabled = !isConnecting
-        binding.scanRecyclerView.isEnabled = !isConnecting // Prevent clicks during connection attempt
+        val isBusy = state == BleConnectionState.CONNECTING || isAuthenticating
+        binding.scanButton.isEnabled = !isBusy
+        binding.scanRecyclerView.isEnabled = !isBusy // Prevent clicks during connection attempt
 
         binding.scanStatusText.isVisible = true
-        binding.scanStatusText.text = when(state) {
+        binding.scanStatusText.text = when {
+            state == BleConnectionState.CONNECTED && authState == BleAuthState.AUTHENTICATING -> "Authenticating..."
+            state == BleConnectionState.CONNECTED && authState == BleAuthState.AUTH_FAILED -> "Authentication failed"
+            state == BleConnectionState.CONNECTED && authState == BleAuthState.AUTHENTICATED -> getString(R.string.connected)
+            else -> when(state) {
             BleConnectionState.SCANNING -> getString(R.string.status_scanning)
             BleConnectionState.CONNECTING -> getString(R.string.connecting) // Maybe add device name later
             BleConnectionState.DISCONNECTED -> getString(R.string.scan_stopped) // Or "Ready to Scan"
             BleConnectionState.CONNECTED -> getString(R.string.connected) // Should navigate away
             BleConnectionState.FAILED -> getString(R.string.connection_failed) // Indicate failure clearly
+            }
         }
         // Show error text on FAILED
         if (state == BleConnectionState.FAILED) {

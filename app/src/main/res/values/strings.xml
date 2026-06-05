@@ -66,6 +66,11 @@
     <string name="preset_load">Load</string>
     <string name="preset_add_new">Add new preset</string>
     <string name="reset">Reset</string>
+    <string name="ride_log_start">Log</string>
+    <string name="ride_log_stop">Stop</string>
+    <string name="ride_log_folder_required">Wybierz folder logow</string>
+    <string name="ride_log_folder_cancelled">Nie wybrano folderu logow</string>
+    <string name="ride_log_folder_permission_failed">Brak zgody na zapis w tym folderze</string>
     <string name="system_info">System</string>
     <string name="live_data">Live Data</string>
     <string name="refresh">Odśwież</string>

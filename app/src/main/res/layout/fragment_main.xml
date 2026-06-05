@@ -364,6 +364,23 @@
             app:iconTint="@color/white" />
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/rideLogNavButton"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="0dp"
+            android:layout_height="64dp"
+            android:layout_weight="1"
+            android:maxLines="1"
+            android:text="@string/ride_log_start"
+            android:textSize="11sp"
+            android:textColor="@color/white"
+            app:backgroundTint="@color/nav_icon"
+            app:cornerRadius="8dp"
+            app:icon="@drawable/ic_dashboard_24"
+            app:iconGravity="top"
+            app:iconPadding="2dp"
+            app:iconTint="@color/white" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/systemInfoNavButton"
             style="@style/Widget.MaterialComponents.Button.TextButton"
             android:layout_width="0dp"

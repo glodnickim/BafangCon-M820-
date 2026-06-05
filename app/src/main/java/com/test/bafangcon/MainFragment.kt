@@ -22,6 +22,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -46,6 +47,26 @@ class MainFragment : Fragment() {
     private val binding get() = _binding!!
 
     private val viewModel: DeviceViewModel by activityViewModels()
+    private lateinit var devicePreferences: DevicePreferences
+
+    private val rideLogDirectoryPicker =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri == null) {
+                Toast.makeText(requireContext(), R.string.ride_log_folder_cancelled, Toast.LENGTH_SHORT).show()
+                return@registerForActivityResult
+            }
+
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            try {
+                requireContext().contentResolver.takePersistableUriPermission(uri, flags)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Could not persist ride log folder permission", e)
+                Toast.makeText(requireContext(), R.string.ride_log_folder_permission_failed, Toast.LENGTH_SHORT).show()
+                return@registerForActivityResult
+            }
+
+            viewModel.startRideLogging(uri)
+        }
 
     private var editablePersonalizedInfo: PersonalizedInfo? = null
     private var originalPersonalizedInfo: PersonalizedInfo? = null
@@ -92,6 +113,7 @@ class MainFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        devicePreferences = DevicePreferences(requireContext())
         presetManager = PresetManager(requireContext())
         presetManager.createDefaultPresetsIfNeeded()
         setupSystemBarInsets()
@@ -100,9 +122,7 @@ class MainFragment : Fragment() {
         setupMainBottomGlobalSliders()
         observeViewModel()
         binding.debugLogToggle.text = getString(R.string.info_label)
-        if (viewModel.controllerInfo.value?.rawData == null) {
-            viewModel.requestControllerInfo()
-        }
+        requestInitialDataIfAuthenticated()
     }
 
     private fun setupSystemBarInsets() {
@@ -142,13 +162,21 @@ class MainFragment : Fragment() {
     // --- MODIFIED setupListeners ---
     private fun setupListeners() {
         binding.topDisconnectButton.setOnClickListener {
-            DevicePreferences(requireContext()).clear()
+            devicePreferences.clear()
             if (isSystemInfoVisible) toggleSystemInfo()
             viewModel.disconnect()
         }
 
         binding.systemInfoNavButton.setOnClickListener {
             toggleSystemInfo()
+        }
+
+        binding.rideLogNavButton.setOnClickListener {
+            if (viewModel.rideLogState.value.isLogging) {
+                viewModel.stopRideLogging()
+            } else {
+                pickRideLogDirectory()
+            }
         }
 
         binding.updateNavButton.setOnClickListener {
@@ -250,6 +278,11 @@ class MainFragment : Fragment() {
 
     }
 
+    private fun pickRideLogDirectory() {
+        Toast.makeText(requireContext(), R.string.ride_log_folder_required, Toast.LENGTH_SHORT).show()
+        rideLogDirectoryPicker.launch(null)
+    }
+
 
     // --- Other functions (checkRequiredPermissions, setInteractionEnabled, etc.) remain the same ---
     private fun checkRequiredPermissions() {
@@ -277,10 +310,15 @@ class MainFragment : Fragment() {
 
     private fun setInteractionEnabled(enabled: Boolean) {
         val isConnected = viewModel.connectionState.value == BleConnectionState.CONNECTED
-        val enableButtons = enabled && isConnected
+        val isAuthenticated = viewModel.authState.value == BleAuthState.AUTHENTICATED
+        val enableButtons = enabled && isConnected && isAuthenticated
 
         binding.topDisconnectButton.visibility = if (isConnected) View.VISIBLE else View.GONE
         binding.updateNavButton.isEnabled = enableButtons && editablePersonalizedInfo != null
+        binding.rideLogNavButton.isEnabled = enableButtons || viewModel.rideLogState.value.isLogging
+        binding.rideLogNavButton.text = getString(
+            if (viewModel.rideLogState.value.isLogging) R.string.ride_log_stop else R.string.ride_log_start
+        )
 
         val hasInfo = editablePersonalizedInfo != null
         binding.presetButton.isEnabled = hasInfo
@@ -585,14 +623,36 @@ class MainFragment : Fragment() {
                             if (activity is RootActivity && parentFragmentManager.findFragmentById(R.id.fragment_container) !is ScanFragment) {
                                 (activity as RootActivity).navigateToScanFragment()
                             }
-                        } else if (state == BleConnectionState.CONNECTED && hasConnectPermission()) {
-                            requestPersonalizedInfoIfNeeded()
+                        }
+                    }
+                }
+
+                launch {
+                    viewModel.authState.collect { authState ->
+                        updateUiState(viewModel.connectionState.value, hasConnectPermission())
+                        when (authState) {
+                            BleAuthState.AUTHENTICATED -> {
+                                requestInitialDataIfAuthenticated()
+                                requestPersonalizedInfoIfNeeded()
+                            }
+                            BleAuthState.AUTH_FAILED -> {
+                                autoPersonalizedRequested = false
+                                autoRequestJob?.cancel()
+                                binding.assistSummaryTextView.text = getString(R.string.assist_summary_empty)
+                            }
+                            else -> Unit
                         }
                     }
                 }
 
                 // Observe Data StateFlows for UI display updates
                 launch { viewModel.personalizedInfo.collect { info -> updatePersonalizedInfoUI(info) } }
+
+                launch {
+                    viewModel.rideLogState.collect {
+                        setInteractionEnabled(hasConnectPermission())
+                    }
+                }
 
                 // Re-bind global sliders when A3 controller data arrives (e.g. after write)
                 launch { viewModel.controllerInfo.collect { ci ->
@@ -630,22 +690,32 @@ class MainFragment : Fragment() {
     // Update UI based on Connection State and Permissions
     private fun updateUiState(state: BleConnectionState, hasPermission: Boolean) {
         val isConnected = state == BleConnectionState.CONNECTED
+        val authState = viewModel.authState.value
         setInteractionEnabled(hasPermission && isConnected) // Use helper
 
         binding.connectionStatusTextView.text = when(state) {
-            BleConnectionState.CONNECTED -> getString(R.string.status_connected, "E-Bike") + if(!hasPermission) " (Permission Missing!)" else ""
+            BleConnectionState.CONNECTED -> when (authState) {
+                BleAuthState.AUTHENTICATED -> getString(R.string.status_connected, "E-Bike") + if(!hasPermission) " (Permission Missing!)" else ""
+                BleAuthState.AUTHENTICATING -> "Status: Authenticating"
+                BleAuthState.AUTH_FAILED -> "Status: Authentication failed"
+                BleAuthState.NOT_AUTHENTICATED -> "Status: Connected, waiting for authentication"
+            }
             BleConnectionState.DISCONNECTED -> getString(R.string.status_disconnected)
             BleConnectionState.CONNECTING -> getString(R.string.connecting)
             BleConnectionState.FAILED -> getString(R.string.status_failed)
             BleConnectionState.SCANNING -> "Unexpected: Scanning" // Should not be in this fragment when scanning
         }
+    }
 
-        if (isConnected && hasPermission) {
-            requestPersonalizedInfoIfNeeded()
+    private fun requestInitialDataIfAuthenticated() {
+        if (viewModel.authState.value != BleAuthState.AUTHENTICATED) return
+        if (viewModel.controllerInfo.value?.rawData == null) {
+            viewModel.requestControllerInfo()
         }
     }
 
     private fun requestPersonalizedInfoIfNeeded() {
+        if (viewModel.authState.value != BleAuthState.AUTHENTICATED) return
         if (autoPersonalizedRequested && autoRequestJob?.isActive == true) return
         autoPersonalizedRequested = true
         autoRequestJob?.cancel()

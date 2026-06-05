@@ -2,6 +2,7 @@ package com.test.bafangcon
 
 import android.Manifest
 import android.app.Application
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
@@ -30,6 +31,7 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
     val iotConfigInfo: StateFlow<IotConfigInfo?> = bleRepository.iotConfigInfo
     val iotCanInfo: StateFlow<IotCanInfo?> = bleRepository.iotCanInfo
     val authState: StateFlow<BleAuthState> = bleRepository.authState
+    val rideLogState: StateFlow<RideLogState> = bleRepository.rideLogState
 
     // Expose required permissions based on Android version
     val requiredPermissions: List<String>
@@ -75,6 +77,14 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun clearBleLogs() { bleRepository.clearBleLogs() }
+
+    fun startRideLogging(destinationTreeUri: Uri) {
+        bleRepository.startRideLogging(destinationTreeUri)
+    }
+
+    fun stopRideLogging() {
+        bleRepository.stopRideLogging()
+    }
 
     fun requestBatteryInfo() {
         viewModelScope.launch {

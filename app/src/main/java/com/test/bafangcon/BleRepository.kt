@@ -6,16 +6,24 @@ import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
 import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import com.test.bafangcon.utils.AESUtils
+import java.io.BufferedWriter
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.OutputStreamWriter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.LinkedList // Import LinkedList for Queue
+import java.util.Locale
 import java.util.Queue
 import java.util.concurrent.atomic.AtomicBoolean // Import AtomicBoolean
 
@@ -71,6 +79,8 @@ class BleRepository(private val context: Context) {
     val bleLogs = MutableStateFlow<List<String>>(emptyList())
     private val _connectionError = MutableStateFlow<String?>(null)
     val connectionError: StateFlow<String?> = _connectionError.asStateFlow()
+    private val _rideLogState = MutableStateFlow(RideLogState())
+    val rideLogState: StateFlow<RideLogState> = _rideLogState.asStateFlow()
 
     fun addLog(msg: String) {
         val timestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
@@ -81,11 +91,93 @@ class BleRepository(private val context: Context) {
     fun clearPersonalizedInfo() { _personalizedInfo.value = null }
     fun setPersonalizedInfo(info: PersonalizedInfo) { _personalizedInfo.value = info }
 
+    fun startRideLogging(destinationTreeUri: Uri) {
+        if (_rideLogState.value.isLogging) return
+        if (_authState.value != BleAuthState.AUTHENTICATED) {
+            addLog("Ride logging requires authenticated connection.")
+            return
+        }
+
+        val startedAt = System.currentTimeMillis()
+        try {
+            val filename = "ride-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(startedAt))}.csv"
+            val documentUri = createRideLogDocument(destinationTreeUri, filename)
+            val stream = context.contentResolver.openOutputStream(documentUri, "w")
+                ?: throw IOException("Cannot open $filename for writing")
+            val writer = BufferedWriter(OutputStreamWriter(stream))
+            writer.write(RideTelemetrySample.csvHeader())
+            writer.newLine()
+            writer.flush()
+
+            synchronized(rideLogLock) {
+                rideLogWriter = writer
+                rideLogStartedAtMs = startedAt
+                lastRideTelemetryLogMs = 0
+                _rideLogState.value = RideLogState(isLogging = true, filePath = documentUri.toString())
+            }
+
+            addLog("Ride logging started: $filename")
+            rideLoggingJob?.cancel()
+            rideLoggingJob = coroutineScope.launch {
+                while (
+                    isActive &&
+                    _connectionState.value == BleConnectionState.CONNECTED &&
+                    _authState.value == BleAuthState.AUTHENTICATED
+                ) {
+                    requestDataSegment(
+                        CMD_ID_CONTROLLER,
+                        RideTelemetrySample.CONTROLLER_TELEMETRY_OFFSET,
+                        RideTelemetrySample.CONTROLLER_TELEMETRY_LENGTH
+                    )
+                    delay(RIDE_LOG_INTERVAL_MS)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not start ride logging: ${e.message}", e)
+            addLog("Ride logging failed: ${e.message}")
+        }
+    }
+
+    fun stopRideLogging() {
+        val previousPath = _rideLogState.value.filePath
+        rideLoggingJob?.cancel()
+        rideLoggingJob = null
+
+        synchronized(rideLogLock) {
+            try {
+                rideLogWriter?.flush()
+                rideLogWriter?.close()
+            } catch (e: IOException) {
+                Log.w(TAG, "Could not close ride log: ${e.message}", e)
+            } finally {
+                rideLogWriter = null
+                rideLogStartedAtMs = null
+                _rideLogState.value = RideLogState()
+            }
+        }
+
+        if (previousPath != null) {
+            addLog("Ride logging stopped: $previousPath")
+        }
+    }
+
+    private fun createRideLogDocument(destinationTreeUri: Uri, filename: String): Uri {
+        val treeDocumentId = DocumentsContract.getTreeDocumentId(destinationTreeUri)
+        val parentUri = DocumentsContract.buildDocumentUriUsingTree(destinationTreeUri, treeDocumentId)
+        return DocumentsContract.createDocument(context.contentResolver, parentUri, "text/csv", filename)
+            ?: throw IOException("Cannot create $filename in selected folder")
+    }
+
     // --- Coroutine Scope ---
     private val coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var scanJob: Job? = null
     private var connectJob: Job? = null
     private var heartbeatJob: Job? = null
+    private var rideLoggingJob: Job? = null
+    private var rideLogWriter: BufferedWriter? = null
+    private var rideLogStartedAtMs: Long? = null
+    private val rideLogLock = Any()
+    private var lastRideTelemetryLogMs: Long = 0
 
     // --- Fragmentation Buffering State ---
     private var isAssemblingFragmentedFrame: Boolean = false
@@ -98,6 +190,8 @@ class BleRepository(private val context: Context) {
     // --- Auth State Tracking ---
     private var authChallenge: ByteArray? = null
     private var isAuthFlowRunning = false
+    private var authTimeoutJob: Job? = null
+    private var mtuAuthFallbackJob: Job? = null
     // ------------------------
 
     private data class PendingPersonalizedWrite(
@@ -110,6 +204,10 @@ class BleRepository(private val context: Context) {
         private const val TAG = "BleRepository"
         private const val SCAN_PERIOD: Long = 10000 // Scan for 10 seconds
         private const val CONNECTION_TIMEOUT: Long = 10000 // Connection attempt timeout
+        private const val AUTH_TIMEOUT: Long = 10000
+        private const val MTU_AUTH_FALLBACK_DELAY: Long = 1500
+        private const val RIDE_LOG_INTERVAL_MS: Long = 1000
+        private const val RIDE_LOG_STATUS_INTERVAL_MS: Long = 2000
 
      //  Constants
         private const val FRAME_START_BYTE_1: Byte = 0x55
@@ -323,33 +421,62 @@ class BleRepository(private val context: Context) {
 
         stopScan() // Stop scanning before connecting
 
+        addLog("Connecting to ${device.name ?: deviceAddress}...")
         Log.d(TAG,"Connecting to ${device.name ?: deviceAddress}...")
         _connectionState.value = BleConnectionState.CONNECTING
         clearCommandQueue()
 
         connectJob?.cancel()
         connectJob = coroutineScope.launch(Dispatchers.IO) {
-            try {
-                currentGatt?.close()
-                currentGatt = null
-                writeCharacteristic = null
-                notifyCharacteristic = null
+            var attempt = 0
+            var connected = false
+            while (attempt < 2 && !connected) {
+                attempt++
+                try {
+                    _connectionState.value = BleConnectionState.CONNECTING
+                    currentGatt?.close()
+                    currentGatt = null
+                    writeCharacteristic = null
+                    notifyCharacteristic = null
 
-                currentGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-                if (currentGatt == null) { throw Exception("connectGatt returned null") }
+                    delay(600) // pause after stopScan for Samsung M51 compat
 
-                withTimeout(CONNECTION_TIMEOUT) {
-                    _connectionState.first { it != BleConnectionState.CONNECTING }
+                    addLog("connectGatt attempt $attempt")
+                    currentGatt = if (attempt == 1) {
+                        device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                    } else {
+                        device.connectGatt(context, false, gattCallback)
+                    }
+                    if (currentGatt == null) throw Exception("connectGatt returned null")
+                    addLog("connectGatt returned non-null")
+
+                    withTimeout(CONNECTION_TIMEOUT) {
+                        _connectionState.first { it != BleConnectionState.CONNECTING }
+                    }
+                    connected = true
+                } catch (e: TimeoutCancellationException) {
+                    Log.w(TAG, "Attempt $attempt timed out for $deviceAddress")
+                    addLog("Attempt $attempt timeout")
+                    if (attempt < 2) {
+                        addLog("Retrying after 1s...")
+                        delay(1000)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Attempt $attempt failed for $deviceAddress: ${e.message}", e)
+                    addLog("Attempt $attempt failed: ${e.message}")
+                    if (attempt < 2) {
+                        addLog("Retrying after 1s...")
+                        delay(1000)
+                    }
                 }
-            } catch (e: TimeoutCancellationException) {
-                Log.w(TAG, "Connection attempt timed out for $deviceAddress")
-                handleDisconnectOrFailure()
-            } catch (e: Exception) {
-                Log.e(TAG, "Connection failed for $deviceAddress: ${e.message}", e)
-                handleDisconnectOrFailure()
-            } finally {
-                connectJob = null
             }
+            if (!connected) {
+                addLog("All connection attempts failed")
+                handleDisconnectOrFailure()
+                _connectionState.value = BleConnectionState.FAILED
+                _connectionError.value = "Connection failed after $attempt attempts"
+            }
+            connectJob = null
         }
     }
 
@@ -379,6 +506,7 @@ class BleRepository(private val context: Context) {
     @SuppressLint("MissingPermission")
     private fun handleDisconnectOrFailure() {
         val wasConnecting = _connectionState.value == BleConnectionState.CONNECTING
+        stopRideLogging()
         currentGatt?.close() // Ensure closed if not null
         currentGatt = null
         writeCharacteristic = null
@@ -396,6 +524,10 @@ class BleRepository(private val context: Context) {
         _authState.value = BleAuthState.NOT_AUTHENTICATED
         authChallenge = null
         isAuthFlowRunning = false
+        authTimeoutJob?.cancel()
+        authTimeoutJob = null
+        mtuAuthFallbackJob?.cancel()
+        mtuAuthFallbackJob = null
         pendingPersonalizedWrite = null
         negotiatedMtu = 23
         heartbeatJob?.cancel()
@@ -420,6 +552,7 @@ class BleRepository(private val context: Context) {
                     when (newState) {
                         BluetoothProfile.STATE_CONNECTED -> {
                             Log.i(TAG, "Successfully connected to $deviceName")
+                            addLog("GATT connected")
                             clearCommandQueue() // Ensure queue is clear
                             delay(600)
                             if (!gatt.discoverServices()) {
@@ -437,6 +570,7 @@ class BleRepository(private val context: Context) {
                     }
                 } else {
                     Log.e(TAG, "GATT Error onConnectionStateChange for $deviceName. Status: $status, NewState: $newState")
+                    addLog("GATT error: status=$status newState=$newState")
                     handleDisconnectOrFailure() // Use helper to reset state
                     if (newState == BluetoothProfile.STATE_CONNECTING || _connectionState.value == BleConnectionState.CONNECTING) {
                         _connectionState.value = BleConnectionState.FAILED
@@ -451,10 +585,12 @@ class BleRepository(private val context: Context) {
             coroutineScope.launch {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.i(TAG, "Services discovered successfully for $deviceName.")
+                    addLog("Services discovered")
                     logDiscoveredGatt(gatt)
                     val service = gatt.getService(BleConstants.SERVICE_UUID) // Check for NUS
                     if (service == null) {
                         Log.e(TAG, "Nordic UART Service ${BleConstants.SERVICE_UUID} not found on $deviceName")
+                        addLog("NUS service not found")
                         gatt.disconnect()
                         _connectionState.value = BleConnectionState.FAILED
                         return@launch
@@ -483,7 +619,7 @@ class BleRepository(private val context: Context) {
             val cccdUuid = BleConstants.CCCD_UUID
             val descriptor = characteristic.getDescriptor(cccdUuid)
             if (descriptor == null) { /* Error handling */ Log.e(TAG, "CCCD descriptor not found"); gatt.disconnect(); _connectionState.value = BleConnectionState.FAILED; return }
-            if (!gatt.setCharacteristicNotification(characteristic, true)) { /* Error handling */ Log.e(TAG, "Failed to enable local notification"); gatt.disconnect(); _connectionState.value = BleConnectionState.FAILED; return }
+            if (!gatt.setCharacteristicNotification(characteristic, true)) { /* Error handling */                         Log.e(TAG, "Failed to enable local notification"); addLog("setCharacteristicNotification failed"); gatt.disconnect(); _connectionState.value = BleConnectionState.FAILED; return }
             Log.d(TAG, "Writing ENABLE_NOTIFICATION_VALUE to CCCD ${descriptor.uuid}")
             val payload = when {
                 characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY > 0 -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
@@ -506,10 +642,24 @@ class BleRepository(private val context: Context) {
                 if (descriptor.uuid == BleConstants.CCCD_UUID && descriptor.characteristic.uuid == BleConstants.UART_NOTIFY_UUID) {
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         Log.i(TAG, "Notifications enabled successfully for $deviceName")
+                        addLog("CCCD written, requesting MTU")
                         _connectionState.value = BleConnectionState.CONNECTED
-                        // Start auth flow and request MTU
-                        startAuthentication()
-                        requestMtu(gatt)
+                        val mtuRequested = requestMtu(gatt)
+                        if (mtuRequested) {
+                            mtuAuthFallbackJob?.cancel()
+                            mtuAuthFallbackJob = coroutineScope.launch {
+                                delay(MTU_AUTH_FALLBACK_DELAY)
+                                if (_connectionState.value == BleConnectionState.CONNECTED &&
+                                    _authState.value == BleAuthState.NOT_AUTHENTICATED
+                                ) {
+                                    addLog("MTU callback timeout, starting authentication")
+                                    startAuthentication()
+                                }
+                            }
+                        } else {
+                            addLog("MTU request failed immediately, starting authentication")
+                            startAuthentication()
+                        }
                     } else {
                         Log.e(TAG, "Failed to write CCCD for $deviceName. Status: $status")
                         gatt.disconnect()
@@ -557,8 +707,17 @@ class BleRepository(private val context: Context) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 negotiatedMtu = mtu
                 Log.i(TAG, "MTU changed to $mtu for $deviceName (max write payload ${maxWritePayloadSize()} bytes)")
+                addLog("MTU changed to $mtu")
             }
-            else { Log.w(TAG, "MTU change failed for $deviceName. Status: $status"); }
+            else { Log.w(TAG, "MTU change failed for $deviceName. Status: $status"); addLog("MTU change failed: status $status"); }
+            mtuAuthFallbackJob?.cancel()
+            mtuAuthFallbackJob = null
+            if (_connectionState.value == BleConnectionState.CONNECTED &&
+                _authState.value == BleAuthState.NOT_AUTHENTICATED
+            ) {
+                addLog("Starting authentication after MTU callback")
+                startAuthentication()
+            }
         }
     } // End gattCallback
 
@@ -861,7 +1020,7 @@ class BleRepository(private val context: Context) {
     }
 
     // --- MTU ---
-    private fun requestMtu(gatt: BluetoothGatt) {
+    private fun requestMtu(gatt: BluetoothGatt): Boolean {
         @SuppressLint("MissingPermission")
         val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             gatt.requestMtu(250)
@@ -870,46 +1029,56 @@ class BleRepository(private val context: Context) {
             gatt.requestMtu(250)
         }
         Log.d(TAG, "Requested MTU 250, result: $result")
+        addLog("Requested MTU 250: $result")
+        return result
     }
 
     // --- Auth Flow ---
     private fun startAuthentication() {
+        if (isAuthFlowRunning || _authState.value == BleAuthState.AUTHENTICATED) {
+            Log.d(TAG, "Authentication already running or complete, skipping start")
+            return
+        }
         Log.i(TAG, "Starting authentication flow...")
+        addLog("Authentication started")
         authChallenge = null
         isAuthFlowRunning = true
         _authState.value = BleAuthState.AUTHENTICATING
+        authTimeoutJob?.cancel()
+        authTimeoutJob = coroutineScope.launch {
+            delay(AUTH_TIMEOUT)
+            if (isAuthFlowRunning && _authState.value == BleAuthState.AUTHENTICATING) {
+                failAuthentication("Authentication timeout after ${AUTH_TIMEOUT}ms")
+            }
+        }
 
         // Step 1: Read 4 random bytes from auth device
         val frame = createReadRequestFrame(CMD_ID_AUTH, 0, 4)
         if (frame.isNotEmpty()) {
+            addLog("Auth read TX: ${frame.toHexString()}")
             sendCommand(frame)
             Log.d(TAG, "Auth step 1: sent meterRead(0x10, 0x00, 4)")
         } else {
-            Log.e(TAG, "Failed to create auth read frame")
-            _authState.value = BleAuthState.AUTH_FAILED
-            isAuthFlowRunning = false
+            failAuthentication("Failed to create auth read frame")
         }
     }
 
     private fun handleAuthChallenge(payload: ByteArray) {
         if (payload.size != 4) {
-            Log.e(TAG, "Auth challenge expected 4 bytes, got ${payload.size}")
-            _authState.value = BleAuthState.AUTH_FAILED
-            isAuthFlowRunning = false
+            failAuthentication("Auth challenge expected 4 bytes, got ${payload.size}")
             return
         }
 
         authChallenge = payload.copyOf()
         Log.d(TAG, "Auth step 1 complete: received challenge ${payload.toHexString()}")
+        addLog("Auth challenge RX: ${payload.toHexString()}")
 
         // Step 2: Pad to 16 bytes with zeros, encrypt with AES
         val padded = payload + ByteArray(12) // 4 + 12 zeros = 16
         val encrypted = AESUtils.encrypt(padded)
 
         if (encrypted == null) {
-            Log.e(TAG, "Auth step 2 failed: AES encryption returned null")
-            _authState.value = BleAuthState.AUTH_FAILED
-            isAuthFlowRunning = false
+            failAuthentication("Auth step 2 failed: AES encryption returned null")
             return
         }
 
@@ -918,12 +1087,11 @@ class BleRepository(private val context: Context) {
         // Step 3: Send certification
         val certFrame = createCertificationFrame(CMD_ID_AUTH, 0, encrypted)
         if (certFrame.isNotEmpty()) {
+            addLog("Auth cert TX: ${certFrame.toHexString()}")
             sendCommand(certFrame)
             Log.d(TAG, "Auth step 3: sent certification")
         } else {
-            Log.e(TAG, "Failed to create certification frame")
-            _authState.value = BleAuthState.AUTH_FAILED
-            isAuthFlowRunning = false
+            failAuthentication("Failed to create certification frame")
         }
     }
 
@@ -937,8 +1105,12 @@ class BleRepository(private val context: Context) {
             -1
         }
 
+        addLog("Auth result RX: ${resultPayload.toHexString()} -> $result")
         if (result == 0) {
             Log.i(TAG, "Authentication SUCCESSFUL!")
+            addLog("Authentication SUCCESSFUL")
+            authTimeoutJob?.cancel()
+            authTimeoutJob = null
             _authState.value = BleAuthState.AUTHENTICATED
             // Pre-fetch all data immediately so UI has it as soon as it renders
             coroutineScope.launch {
@@ -964,11 +1136,22 @@ class BleRepository(private val context: Context) {
                 }
             }
         } else {
-            Log.e(TAG, "Authentication FAILED. Result: $result (payload: ${resultPayload.toHexString()})")
-            _authState.value = BleAuthState.AUTH_FAILED
+            failAuthentication("Authentication FAILED. Result: $result (payload: ${resultPayload.toHexString()})")
         }
         isAuthFlowRunning = false
         authChallenge = null
+    }
+
+    private fun failAuthentication(message: String) {
+        Log.e(TAG, message)
+        addLog(message)
+        authTimeoutJob?.cancel()
+        authTimeoutJob = null
+        _authState.value = BleAuthState.AUTH_FAILED
+        _connectionError.value = message
+        isAuthFlowRunning = false
+        authChallenge = null
+        clearCommandQueue()
     }
 
     /**
@@ -1165,6 +1348,9 @@ class BleRepository(private val context: Context) {
             Log.i(TAG, "AFTER WRITE notify raw ($rawHexString) [${msSinceWrite}ms after write]")
         }
         Log.d(TAG,"Raw BLE Notify: $rawHexString (Size: ${data.size})")
+        if (isAuthFlowRunning || _authState.value != BleAuthState.AUTHENTICATED) {
+            addLog("Raw BLE Notify: $rawHexString (size=${data.size})")
+        }
 
         // --- Frame Assembly Logic ---
         if (data.isNotEmpty()) {
@@ -1367,6 +1553,7 @@ class BleRepository(private val context: Context) {
                     handled = true
                 } else {
                     Log.w(TAG, "Auth frame: unexpected payload size ${payloadData.size}")
+                    addLog("Auth frame unexpected payload size ${payloadData.size}: ${payloadData.toHexString()}")
                 }
             }
 
@@ -1383,6 +1570,14 @@ class BleRepository(private val context: Context) {
                     val info = ControllerInfo.parseControllerInfoPayload(payloadData)
                     if (info != null) {
                         _controllerInfo.value = info
+                        handleRideTelemetrySample(
+                            RideTelemetrySample.fromControllerInfo(
+                                info = info,
+                                batteryInfo = _batteryInfo.value,
+                                startedAtMs = rideLogStartedAtMs,
+                                source = "A3_FULL"
+                            )
+                        )
                         Log.d(TAG,"Parsed Full Controller Data: ${info.toString()}") // Use data class toString
                     } else {
                         Log.w(TAG,"Failed to parse Full Controller Info payload.")
@@ -1468,27 +1663,31 @@ class BleRepository(private val context: Context) {
                     handled = true
                     Log.d(TAG,"Partial Controller Data (Start=$rspStartPos, Len=$actualPayloadSize): ${payloadData.toHexString()}")
 
-                    // --- Apply Partial Update ---
-                    // 1. Get the current state (make a copy to ensure StateFlow emission)
-                    val currentInfo = _controllerInfo.value?.copy(
-                        // Deep copy arrays if necessary, although updatePartial modifies the copy directly
-                        gearSpeedLimit = _controllerInfo.value?.gearSpeedLimit?.copyOf() ?: ByteArray(10),
-                        gearCurrentLimit = _controllerInfo.value?.gearCurrentLimit?.copyOf() ?: ByteArray(10)
-                    )?.also { it.rawData = _controllerInfo.value?.rawData }
-
-                    if (currentInfo != null) {
-                        // 2. Apply the update to the copy
-                        val success = currentInfo.updatePartial(payloadData, rspStartPos)
-                        if (success) {
-                            // 3. Emit the modified copy
-                            _controllerInfo.value = currentInfo
-                            Log.d(TAG,"Successfully applied partial update to ControllerInfo.")
-                        } else {
-                            Log.w(TAG,"Failed to apply partial update to ControllerInfo (offset $rspStartPos).")
-                        }
+                    if (applyControllerTelemetrySegment(payloadData, rspStartPos)) {
+                        Log.d(TAG,"Applied controller telemetry segment.")
                     } else {
-                        // Cannot apply partial update if we don't have the full data yet.
-                        Log.w(TAG, "Received partial Controller update (offset $rspStartPos), but no full data available to update.")
+                        // --- Apply Partial Update ---
+                        // 1. Get the current state (make a copy to ensure StateFlow emission)
+                        val currentInfo = _controllerInfo.value?.copy(
+                            // Deep copy arrays if necessary, although updatePartial modifies the copy directly
+                            gearSpeedLimit = _controllerInfo.value?.gearSpeedLimit?.copyOf() ?: ByteArray(10),
+                            gearCurrentLimit = _controllerInfo.value?.gearCurrentLimit?.copyOf() ?: ByteArray(10)
+                        )?.also { it.rawData = _controllerInfo.value?.rawData }
+
+                        if (currentInfo != null) {
+                            // 2. Apply the update to the copy
+                            val success = currentInfo.updatePartial(payloadData, rspStartPos)
+                            if (success) {
+                                // 3. Emit the modified copy
+                                _controllerInfo.value = currentInfo
+                                Log.d(TAG,"Successfully applied partial update to ControllerInfo.")
+                            } else {
+                                Log.w(TAG,"Failed to apply partial update to ControllerInfo (offset $rspStartPos).")
+                            }
+                        } else {
+                            // Cannot apply partial update if we don't have the full data yet.
+                            Log.w(TAG, "Received partial Controller update (offset $rspStartPos), but no full data available to update.")
+                        }
                     }
                     // -------------------------
                 }
@@ -1548,6 +1747,91 @@ class BleRepository(private val context: Context) {
             }
         }
     } // End parseCompleteFrame
+
+    private fun applyControllerTelemetrySegment(payloadData: ByteArray, rspStartPos: Int): Boolean {
+        if (rspStartPos != RideTelemetrySample.CONTROLLER_TELEMETRY_OFFSET) return false
+        val sample = RideTelemetrySample.fromControllerSegment(
+            payload = payloadData,
+            batteryInfo = _batteryInfo.value,
+            startedAtMs = rideLogStartedAtMs,
+            source = "A3_SEGMENT"
+        ) ?: return false
+
+        val current = _controllerInfo.value
+        val updated = current?.copy(
+            gearSpeedLimit = current.gearSpeedLimit.copyOf(),
+            gearCurrentLimit = current.gearCurrentLimit.copyOf()
+        ) ?: ControllerInfo()
+
+        updated.rawData = current?.rawData?.copyOf()
+        updated.soc = sample.socPercent
+        updated.singleMileage = sample.singleMileageRaw
+        updated.totalMileage = sample.totalMileageRaw
+        updated.emainingMileage = sample.remainingMileageRaw
+        updated.cadence = sample.cadenceRpm
+        updated.moment = sample.torqueRaw
+        updated.speed = sample.speedRaw
+        updated.electricCurrent = sample.currentRaw
+        updated.voltage = sample.voltageRaw
+        updated.controllerTemperature = sample.controllerTempC
+        updated.motorTemperature = sample.motorTempC
+        updated.boostState = sample.boostState
+        updated.speedLimit = sample.speedLimitRaw
+        updated.wheelDiameter = sample.wheelDiameterRaw
+        updated.tireCircumference = sample.tireCircumferenceRaw
+        updated.calories = sample.caloriesRaw
+        updated.currentGear = sample.currentGear
+        updated.totalGear = sample.totalGear
+        updated.wheelSpeed = sample.wheelSpeed
+        updated.wheelCounter = sample.wheelCounter
+        updated.lastTestSenserTime = sample.lastSensorTime
+        updated.crankCadencePulseCounter = sample.crankPulseCounter
+        updated.motorVariableSpeedMasterGear = sample.motorVariableSpeedMasterGear
+        updated.motorSpeedCurrentGear = sample.motorSpeedCurrentGear
+
+        val raw = updated.rawData
+        if (raw != null && raw.size >= rspStartPos + payloadData.size) {
+            System.arraycopy(payloadData, 0, raw, rspStartPos, payloadData.size)
+        }
+
+        _controllerInfo.value = updated
+        handleRideTelemetrySample(sample)
+        return true
+    }
+
+    private fun handleRideTelemetrySample(sample: RideTelemetrySample) {
+        var wrote = false
+        var writeError: Exception? = null
+
+        synchronized(rideLogLock) {
+            val writer = rideLogWriter
+            if (writer != null) {
+                try {
+                    writer.write(sample.toCsvLine())
+                    writer.newLine()
+                    writer.flush()
+                    val state = _rideLogState.value
+                    _rideLogState.value = state.copy(sampleCount = state.sampleCount + 1)
+                    wrote = true
+                } catch (e: Exception) {
+                    writeError = e
+                }
+            }
+        }
+
+        writeError?.let {
+            Log.e(TAG, "Ride log write failed: ${it.message}", it)
+            addLog("Ride logging write failed: ${it.message}")
+            stopRideLogging()
+            return
+        }
+
+        if (!wrote) return
+        if (sample.timestampMs - lastRideTelemetryLogMs >= RIDE_LOG_STATUS_INTERVAL_MS) {
+            lastRideTelemetryLogMs = sample.timestampMs
+            addLog(sample.summary())
+        }
+    }
 
     private fun logWriteAckIfPresent(frame: ByteArray, payloadData: ByteArray) {
         if (frame.size < RSP_MIN_HEADER_SIZE || payloadData.isEmpty()) return
@@ -1635,7 +1919,13 @@ class BleRepository(private val context: Context) {
     }
 
     // --- Cleanup ---
-    fun cleanup() { Log.d(TAG, "Cleaning up BleRepository"); disconnect(); scanJob?.cancel(); coroutineScope.cancel() }
+    fun cleanup() {
+        Log.d(TAG, "Cleaning up BleRepository")
+        stopRideLogging()
+        disconnect()
+        scanJob?.cancel()
+        coroutineScope.cancel()
+    }
     private fun Byte.toHexString(): String = String.format("%02X", this)
 
 
