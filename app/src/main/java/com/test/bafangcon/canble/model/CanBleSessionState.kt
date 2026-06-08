@@ -43,9 +43,11 @@ data class CanBleSessionState(
 
 enum class HandshakeState {
     IDLE,
+    DISCOVERED,
     RAND1_SENT,
-    RAND2_SENT,
-    MTU_SENT,
+    DEVICE_RANDOM_RECEIVED,
+    DYNAMIC_KEY_DERIVED,
+    MTU_REQUEST_SENT,
     READY,
     FAILED
 }
