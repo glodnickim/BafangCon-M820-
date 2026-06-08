@@ -86,24 +86,61 @@ class SystemInfoFragment : Fragment() {
 
         if (currentController != null) {
             val c = currentController!!
-            val items = mutableListOf(
-                SystemInfoItem("Protocol Ver", "0x${String.format("%02X", c.controllerProtocolVersion)}"),
-                SystemInfoItem("Wheel Diameter", "${c.wheelDiameter} \""),
-                SystemInfoItem("Speed Limit", String.format("%.1f km/h", c.speedLimit * 0.01)),
-                SystemInfoItem("Acceleration", c.accelerationSettings.toString()),
+            val identityItems = mutableListOf(
+                SystemInfoItem("Hardware", c.hardVersion.cleanValue()),
+                SystemInfoItem("Software", c.softVersion.cleanValue()),
+                SystemInfoItem("Model", c.model.cleanValue()),
+                SystemInfoItem("Serial", c.sn.cleanValue()),
+                SystemInfoItem("Customer No", c.customerNo.cleanValue()),
+                SystemInfoItem("Manufacturer", c.manufacturer.cleanValue()),
+                SystemInfoItem("Protocol Ver", "0x${String.format("%02X", c.controllerProtocolVersion)}")
+            )
+            sections.add(SystemInfoSection("Controller Identity (A3)", identityItems))
+
+            val liveItems = mutableListOf(
+                SystemInfoItem("SOC", "${c.soc}%"),
                 SystemInfoItem("Speed", String.format("%.1f km/h", c.speed * 0.01)),
                 SystemInfoItem("Current", String.format("%.2f A", c.electricCurrent * 0.01)),
                 SystemInfoItem("Voltage", String.format("%.2f V", c.voltage * 0.01)),
+                SystemInfoItem("Power", String.format("%.1f W", c.voltage * 0.01 * c.electricCurrent * 0.01)),
                 SystemInfoItem("Cadence", "${c.cadence} RPM"),
-                SystemInfoItem("Torque", "${c.moment} mV"),
+                SystemInfoItem("Torque Raw", c.moment.toString()),
                 SystemInfoItem("Controller Temp", "${c.controllerTemperature} °C"),
                 SystemInfoItem("Motor Temp", if (c.motorTemperature > 200) "N/A" else "${c.motorTemperature} °C"),
                 SystemInfoItem("Boost", if (c.boostState != 0) "ON" else "OFF"),
-                SystemInfoItem("Gear", "${c.currentGear}/${c.totalGear}"),
-                SystemInfoItem("SOC", "${c.soc}%"),
-                SystemInfoItem("Calories", c.calories.toString())
+                SystemInfoItem("Gear", "${c.currentGear}/${c.totalGear}")
             )
-            sections.add(SystemInfoSection("Controller (A3)", items))
+            sections.add(SystemInfoSection("Controller Live (A3)", liveItems))
+
+            val telemetryItems = mutableListOf(
+                SystemInfoItem("Single Mileage Raw", c.singleMileage.toString()),
+                SystemInfoItem("Total Mileage Raw", c.totalMileage.toString()),
+                SystemInfoItem("Remaining Mileage Raw", c.emainingMileage.toString()),
+                SystemInfoItem("Calories", c.calories.toString()),
+                SystemInfoItem("Wheel Speed", c.wheelSpeed.toString()),
+                SystemInfoItem("Wheel Counter", c.wheelCounter.toString()),
+                SystemInfoItem("Last Sensor Time", c.lastTestSenserTime.toString()),
+                SystemInfoItem("Crank Pulse Counter", c.crankCadencePulseCounter.toString()),
+                SystemInfoItem("Motor Var Speed Master Gear", c.motorVariableSpeedMasterGear.toString()),
+                SystemInfoItem("Motor Speed Current Gear", c.motorSpeedCurrentGear.toString())
+            )
+            sections.add(SystemInfoSection("Controller Telemetry (A3 160..207)", telemetryItems))
+
+            val settingsItems = mutableListOf(
+                SystemInfoItem("Speed Limit", String.format("%.1f km/h", c.speedLimit * 0.01)),
+                SystemInfoItem("Wheel Diameter", "${c.wheelDiameter} \""),
+                SystemInfoItem("Tire Circumference", "${c.tireCircumference} mm"),
+                SystemInfoItem("Cruise Control", c.cruiseControl.toString()),
+                SystemInfoItem("Boot Default Gear", c.bootDefaultGear.toString()),
+                SystemInfoItem("Boot Default Gear Value", c.bootDefaultGearValue.toString()),
+                SystemInfoItem("Motor Start Angle", c.motorStartingAngle.toString()),
+                SystemInfoItem("Acceleration", c.accelerationSettings.toString()),
+                SystemInfoItem("Gear Speed Limits", c.gearSpeedLimit.joinToString(", ") { "${it.toInt() and 0xFF}%" }),
+                SystemInfoItem("Gear Current Limits", c.gearCurrentLimit.joinToString(", ") { "${it.toInt() and 0xFF}%" }),
+                SystemInfoItem("Buzzer", c.buzzerSwitch.toString())
+            )
+            sections.add(SystemInfoSection("Controller Settings (A3)", settingsItems))
+
         }
 
         if (currentMeter != null) {
@@ -202,5 +239,10 @@ class SystemInfoFragment : Fragment() {
         }
 
         adapter.updateData(sections)
+    }
+
+    private fun String.cleanValue(): String {
+        val cleaned = replace("\u0000", "").trim()
+        return cleaned.ifBlank { "N/A" }
     }
 }
