@@ -1,26 +1,42 @@
 # FT Bafang M820
 
-Android app for Bafang M820 / CAN displays. The app connects over Bluetooth LE,
-authenticates with the display, reads controller/display/battery data and allows
-editing assist settings.
+Android app for Bafang M820 / CAN displays running **Fake Taxi** firmware.
+Connects over Bluetooth LE, authenticates with the display, reads controller/display/battery/sensor data,
+and allows editing assist parameters. Works offline — no internet connection required.
+
+The app has been tested with **DPC245 v3** display and **Fake Taxi 2026.05.22** firmware.
+
+## Current Status — v0.042
+
+- **AA55/NUS** — primary working transport. Stable BLE scan, connection, authentication, data read/write.
+- **CAN BLE** — model classes created (`canble/model/`), transport not yet implemented.
+- **Ride logging** — CSV via SAF folder picker with 28 telemetry fields.
+- **Language** — Polish and English interface support.
+- **Next:** CAN BLE crypto, frame extraction, filtering, and logging (Phase 1 Core).
 
 ## Current Focus
 
 - Bafang M820 with DP C245-30.CAN style BLE display.
-- BLE connection through Nordic UART Service.
-- AA55 protocol frames with AES authentication.
-- Assist profile read/write.
+- BLE connection through Nordic UART Service (NUS) and AA55 protocol frames with AES authentication.
+- CAN BLE service (passive read-only telemetry, in development).
+- Assist profile read/write and preset save/load.
 - System tab for protocol data inspection.
 - Ride logging to CSV for analysis.
+- Charts showing assist levels (MPAndroidChart + custom Canvas).
 
 ## Main Features
 
-- Scan and connect to nearby BLE devices.
-- Authenticate before sending data commands.
-- Read controller data A3, display data A5, battery data A4 and other available blocks.
+- BLE scan and auto-connect to nearby devices (DP prefix filter).
+- AES-based authentication (challenge-response).
+- Read all 7 data types: controller (A3), display (A5), battery (A4), sensor (A7), personalized assist (A9), IoT config (A1), IoT CAN config (A2).
 - Edit assist profile values used by the controller.
-- Show live/system values such as speed, current, voltage, SOC, cadence, gear and temperatures.
+- Write assist, controller, and meter settings.
+- Show live values: speed, current, voltage, SOC, cadence, gear, temperatures.
+- Acceleration and start angle adjustment.
+- Assist presets — save and load custom user settings.
 - Log ride telemetry to CSV.
+- Charts: assist curve visualization, gear comparison.
+- Polish and English language support.
 
 ## Ride Logs
 
@@ -75,24 +91,39 @@ next version.
 
 Example:
 
-- copied APK: `Bafang FT M820 v0.038.apk`
-- `version.properties` after build: `0.039`
-- published version: `v0.038`
+- copied APK: `Bafang FT M820 v0.042.apk`
+- `version.properties` after build: `0.043`
+- published version: `v0.042`
 
 ## Project Files
 
-- `app/src/main/java/com/test/bafangcon/BleRepository.kt` - BLE connection, auth, frame parsing, logging.
-- `app/src/main/java/com/test/bafangcon/RideTelemetrySample.kt` - CSV telemetry sample model.
-- `app/src/main/java/com/test/bafangcon/MainFragment.kt` - main UI, Log/Stop button, folder picker.
-- `version.properties` - next version used by the build.
-- `CHANGELOG.md` - user-visible history of releases.
-- `docs/DOCUMENTATION_WORKFLOW.md` - how to document while coding.
-- `docs/RELEASE_CHECKLIST.md` - checks before publishing APK.
-- `docs/RELEASE_NOTES_TEMPLATE.md` - template for public release notes.
+- `app/src/main/java/com/test/bafangcon/BleRepository.kt` — BLE connection, auth, frame parsing, logging.
+- `app/src/main/java/com/test/bafangcon/canble/` — CAN BLE model classes and future transport.
+- `app/src/main/java/com/test/bafangcon/RideTelemetrySample.kt` — CSV telemetry sample model.
+- `app/src/main/java/com/test/bafangcon/MainFragment.kt` — main UI, Log/Stop button, folder picker.
+- `version.properties` — next version used by the build.
+- `CHANGELOG.md` — user-visible history of releases.
+- `build-app.ps1` — release build script (bumps version, copies APK).
 
-## Related Protocol Docs
+## Documentation
 
-The repository also contains protocol notes in the top-level `docs/` directory:
+The repository contains a `docs/` directory with project and protocol documentation:
+
+| File | Content |
+|---|---|
+| `PROJECT_STATUS.md` | Current version, features, risks, build status |
+| `CURRENT_ARCHITECTURE.md` | Full architecture diagram, BLE and AA55 flow, CAN BLE place |
+| `ROADMAP.md` | Version roadmap (v0.041 → future) |
+| `DECISIONS.md` | All architectural decisions with rationale |
+| `CAN_BLE_PHASE1_PLAN.md` | Detailed Phase 1 implementation plan |
+| `CONTRIBUTING.md` | Branch strategy, commit naming, PR workflow, code style |
+| `RELEASE_PROCESS.md` | Step-by-step release workflow with version history |
+| `DOCUMENTATION_WORKFLOW.md` | How to document while coding |
+| `RELEASE_CHECKLIST.md` | Checks before publishing APK |
+| `RELEASE_NOTES_TEMPLATE.md` | Template for public release notes |
+| `CANABLE_LOG_ANALYSIS.md` | CAN bus log analysis notes |
+
+### Protocol Docs
 
 - `docs/komunikacja-dp-c245.md`
 - `docs/bafang-protocol-logic-junior.md`
