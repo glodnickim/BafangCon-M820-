@@ -13,6 +13,12 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import com.test.bafangcon.canble.crypto.NativeCryptoProvider
+import com.test.bafangcon.canble.handshake.CanBleHandshake
+import com.test.bafangcon.canble.handshake.CoroutineHandshakeTimer
+import com.test.bafangcon.canble.handshake.HandshakeRetryConfig
+import com.test.bafangcon.canble.transport.CanBleTransport
+import com.test.bafangcon.canble.transport.TransportDetector
 import com.test.bafangcon.utils.AESUtils
 import java.io.BufferedWriter
 import java.io.ByteArrayOutputStream
@@ -37,6 +43,14 @@ class BleRepository(private val context: Context) {
     private var currentGatt: BluetoothGatt? = null
     private var writeCharacteristic: BluetoothGattCharacteristic? = null // NUS RX Char
     private var notifyCharacteristic: BluetoothGattCharacteristic? = null // NUS TX Char
+
+    // --- CAN BLE Transport ---
+    private var canControlCharacteristic: BluetoothGattCharacteristic? = null
+    private var canRxCharacteristic: BluetoothGattCharacteristic? = null
+    private var canTxCharacteristic: BluetoothGattCharacteristic? = null
+    private var canBleTransport: CanBleTransport? = null
+    private var canControlSubscribed = false
+    private var canRxSubscribed = false
 
     // --- Command Queue ---
     private val commandQueue: Queue<ByteArray> = LinkedList()
@@ -81,6 +95,24 @@ class BleRepository(private val context: Context) {
     val connectionError: StateFlow<String?> = _connectionError.asStateFlow()
     private val _rideLogState = MutableStateFlow(RideLogState())
     val rideLogState: StateFlow<RideLogState> = _rideLogState.asStateFlow()
+
+    // --- CAN BLE Service Detection ---
+    private val _canBleServiceFound = MutableStateFlow<Boolean?>(null)
+    val canBleServiceFound: StateFlow<Boolean?> = _canBleServiceFound.asStateFlow()
+
+    // --- BLE Services Debug ---
+    private val _bleServicesDebug = MutableStateFlow<List<BleServiceDebugEntry>>(emptyList())
+    val bleServicesDebug: StateFlow<List<BleServiceDebugEntry>> = _bleServicesDebug.asStateFlow()
+
+    // --- AA55 Raw Logger ---
+    private val aa55RawLogger = Aa55RawLogger()
+    private val _aa55RawStats = MutableStateFlow(Aa55RawStats())
+    val aa55RawStats: StateFlow<Aa55RawStats> = _aa55RawStats.asStateFlow()
+
+    // --- BLE Raw Notification Logger ---
+    private val bleRawNotificationLogger = BleRawNotificationLogger()
+    private val _bleRawNotificationStats = MutableStateFlow(BleRawNotificationStats())
+    val bleRawNotificationStats: StateFlow<BleRawNotificationStats> = _bleRawNotificationStats.asStateFlow()
 
     fun addLog(msg: String) {
         val timestamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
@@ -506,7 +538,18 @@ class BleRepository(private val context: Context) {
     @SuppressLint("MissingPermission")
     private fun handleDisconnectOrFailure() {
         val wasConnecting = _connectionState.value == BleConnectionState.CONNECTING
+        aa55RawLogger.stopFileLogging()
+        _aa55RawStats.value = aa55RawLogger.snapshot()
+        bleRawNotificationLogger.stopLogging()
+        _bleRawNotificationStats.value = bleRawNotificationLogger.snapshot()
         stopRideLogging()
+        canBleTransport?.onDisconnected()
+        canBleTransport = null
+        canControlCharacteristic = null
+        canRxCharacteristic = null
+        canTxCharacteristic = null
+        canControlSubscribed = false
+        canRxSubscribed = false
         currentGatt?.close() // Ensure closed if not null
         currentGatt = null
         writeCharacteristic = null
@@ -587,6 +630,12 @@ class BleRepository(private val context: Context) {
                     Log.i(TAG, "Services discovered successfully for $deviceName.")
                     addLog("Services discovered")
                     logDiscoveredGatt(gatt)
+                    _bleServicesDebug.value = gatt.services.map { service ->
+                        BleServiceDebugEntry(
+                            serviceUuid = service.uuid.toString(),
+                            characteristicUuids = service.characteristics.take(20).map { it.uuid.toString() }
+                        )
+                    }.take(20)
                     val service = gatt.getService(BleConstants.SERVICE_UUID) // Check for NUS
                     if (service == null) {
                         Log.e(TAG, "Nordic UART Service ${BleConstants.SERVICE_UUID} not found on $deviceName")
@@ -606,6 +655,32 @@ class BleRepository(private val context: Context) {
                     Log.i(TAG, "NUS write characteristic properties: ${describeProperties(writeCharacteristic!!.properties)}")
                     Log.i(TAG, "NUS notify characteristic properties: ${describeProperties(notifyCharacteristic!!.properties)}")
                     enableNotifications(gatt, notifyCharacteristic!!)
+                    aa55RawLogger.startFileLogging(context)
+                    _aa55RawStats.value = aa55RawLogger.snapshot()
+                    bleRawNotificationLogger.startLogging(context)
+                    _bleRawNotificationStats.value = bleRawNotificationLogger.snapshot()
+
+                    val canInfo = TransportDetector.detect(gatt.services)
+                    _canBleServiceFound.value = canInfo != null
+                    if (canInfo != null) {
+                        canControlCharacteristic = canInfo.controlCharacteristic
+                        canRxCharacteristic = canInfo.rxCharacteristic
+                        canTxCharacteristic = canInfo.txCharacteristic
+                        canControlSubscribed = false
+                        canRxSubscribed = false
+
+                        val crypto = NativeCryptoProvider()
+                        val timer = CoroutineHandshakeTimer()
+                        val handshake = CanBleHandshake(crypto, timer, HandshakeRetryConfig())
+                        canBleTransport = CanBleTransport(handshake)
+                        canBleTransport!!.onWriteRequired = { _, data ->
+                            sendCanCommand(data)
+                        }
+                        canBleTransport!!.onServiceFound()
+
+                        enableNotifications(gatt, canInfo.controlCharacteristic)
+                        enableNotifications(gatt, canInfo.rxCharacteristic)
+                    }
                 } else {
                     Log.e(TAG, "Service discovery failed for $deviceName with status: $status")
                     gatt.disconnect()
@@ -664,6 +739,20 @@ class BleRepository(private val context: Context) {
                         Log.e(TAG, "Failed to write CCCD for $deviceName. Status: $status")
                         gatt.disconnect()
                     }
+                } else if (descriptor.characteristic.uuid == TransportDetector.CAN_CONTROL_UUID) {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        canControlSubscribed = true
+                        checkCanBleReady()
+                    } else {
+                        Log.e(TAG, "Failed to enable CAN_CONTROL notifications. Status: $status")
+                    }
+                } else if (descriptor.characteristic.uuid == TransportDetector.CAN_RX_UUID) {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        canRxSubscribed = true
+                        checkCanBleReady()
+                    } else {
+                        Log.e(TAG, "Failed to enable CAN_RX notifications. Status: $status")
+                    }
                 } else { Log.w(TAG, "onDescriptorWrite for unknown descriptor: ${descriptor.uuid}") }
             }
         }
@@ -696,10 +785,21 @@ class BleRepository(private val context: Context) {
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) { handleCharacteristicChange(characteristic, value) }
         private fun handleCharacteristicChange(characteristic: BluetoothGattCharacteristic, value: ByteArray? = null) {
             val data = value ?: characteristic.value
-            if (characteristic.uuid == BleConstants.UART_NOTIFY_UUID) {
-                if (data != null) { processBleNotificationData(data) } // Call refactored parsing function
-                else { Log.w(TAG, "Received null data on ${characteristic.uuid}") }
-            } else { Log.w(TAG, "onCharacteristicChanged for unexpected characteristic: ${characteristic.uuid}") }
+            bleRawNotificationLogger.log(characteristic.uuid, data)
+            _bleRawNotificationStats.value = bleRawNotificationLogger.snapshot()
+            when (characteristic.uuid) {
+                BleConstants.UART_NOTIFY_UUID -> {
+                    if (data != null) { processBleNotificationData(data) }
+                    else { Log.w(TAG, "Received null data on ${characteristic.uuid}") }
+                }
+                TransportDetector.CAN_CONTROL_UUID -> {
+                    if (data != null) { canBleTransport?.onControlNotificationReceived(data) }
+                }
+                TransportDetector.CAN_RX_UUID -> {
+                    if (data != null) { canBleTransport?.onRxNotificationReceived(data, characteristic.uuid) }
+                }
+                else -> { Log.w(TAG, "onCharacteristicChanged for unexpected characteristic: ${characteristic.uuid}") }
+            }
         }
         @SuppressLint("MissingPermission")
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
@@ -1245,6 +1345,21 @@ class BleRepository(private val context: Context) {
     }
 
 
+    fun sendCanCommand(data: ByteArray) {
+        if (currentGatt == null) { Log.d(TAG, "Cannot send CAN command: GATT not available."); return }
+        val characteristic = canTxCharacteristic ?: run { Log.d(TAG, "Cannot send CAN command: CAN_TX not available."); return }
+        @Suppress("DEPRECATION")
+        characteristic.value = data
+        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        currentGatt?.writeCharacteristic(characteristic)
+    }
+
+    private fun checkCanBleReady() {
+        if (canControlSubscribed && canRxSubscribed && canBleTransport != null) {
+            canBleTransport!!.onNotificationsSubscribed()
+        }
+    }
+
    fun sendCommand(data: ByteArray) {
         if (_connectionState.value != BleConnectionState.CONNECTED) {   Log.d(TAG,"Cannot queue command: Not connected."); return }
         if (writeCharacteristic == null) {   Log.d(TAG,"Cannot queue command: Write Characteristic not available."); return }
@@ -1259,6 +1374,8 @@ class BleRepository(private val context: Context) {
             Log.d(TAG,"Error: Write characteristic does not support writing."); return
         }
         synchronized(commandQueue) { commandQueue.offer(data); Log.d(TAG, "Command queued. Queue size: ${commandQueue.size}") }
+        aa55RawLogger.logTx(data)
+        _aa55RawStats.value = aa55RawLogger.snapshot()
         processNextCommand()
     }
 
@@ -1453,6 +1570,8 @@ class BleRepository(private val context: Context) {
 
     // --- Modified parseCompleteFrame (Handles Full vs Partial based on StartPos) ---
     private fun parseCompleteFrame(data: ByteArray) {
+        aa55RawLogger.logRx(data)
+        _aa55RawStats.value = aa55RawLogger.snapshot()
         val frameHexString = data.toHexString()
         val baseLog = "Processing Assembled Frame: $frameHexString (Size: ${data.size})"
 

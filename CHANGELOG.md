@@ -31,6 +31,12 @@ Use this format:
 ### Fixed
 - Nothing yet.
 
+## v0.040 - 2026-06-05
+
+### Added
+- Expanded the System tab with A3 controller identity, live telemetry, counters
+  and settings already parsed by the app.
+
 ## v0.039 - 2026-06-05
 
 ### Changed

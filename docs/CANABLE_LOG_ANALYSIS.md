@@ -145,6 +145,8 @@ Problems:
 
 ### Step 1 - Low Risk, Use Existing A3/A4/A5 Data
 
+Status: implemented in v0.040.
+
 Update `SystemInfoFragment` to show more fields already parsed by the app:
 
 - A3 hardware version

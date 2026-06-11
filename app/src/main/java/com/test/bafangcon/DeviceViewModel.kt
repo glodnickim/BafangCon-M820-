@@ -33,6 +33,41 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
     val authState: StateFlow<BleAuthState> = bleRepository.authState
     val rideLogState: StateFlow<RideLogState> = bleRepository.rideLogState
 
+    // --- CAN BLE Debug (Phase 1 — static defaults, no runtime data yet) ---
+    private val _canBleDebug = MutableStateFlow(CanBleDebugInfo())
+    val canBleDebug: StateFlow<CanBleDebugInfo> = _canBleDebug.asStateFlow()
+
+    // --- AA55 Raw Debug ---
+    private val _aa55RawStats = MutableStateFlow(Aa55RawStats())
+    val aa55RawStats: StateFlow<Aa55RawStats> = _aa55RawStats.asStateFlow()
+
+    // --- BLE Raw Debug ---
+    private val _bleRawNotificationStats = MutableStateFlow(BleRawNotificationStats())
+    val bleRawNotificationStats: StateFlow<BleRawNotificationStats> = _bleRawNotificationStats.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            bleRepository.canBleServiceFound.collect { found ->
+                _canBleDebug.value = _canBleDebug.value.copy(serviceFound = found)
+            }
+        }
+        viewModelScope.launch {
+            bleRepository.bleServicesDebug.collect { services ->
+                _canBleDebug.value = _canBleDebug.value.copy(bleServicesDebug = services)
+            }
+        }
+        viewModelScope.launch {
+            bleRepository.aa55RawStats.collect { stats ->
+                _aa55RawStats.value = stats
+            }
+        }
+        viewModelScope.launch {
+            bleRepository.bleRawNotificationStats.collect { stats ->
+                _bleRawNotificationStats.value = stats
+            }
+        }
+    }
+
     // Expose required permissions based on Android version
     val requiredPermissions: List<String>
         get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -322,3 +357,14 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         bleRepository.cleanup()
     }
 }
+
+data class CanBleDebugInfo(
+    val serviceFound: Boolean? = null,
+    val transportState: String = "IDLE",
+    val handshakeState: String = "IDLE",
+    val notifications: Int = 0,
+    val framesAccepted: Int = 0,
+    val framesFiltered: Int = 0,
+    val decryptFailures: Int = 0,
+    val bleServicesDebug: List<BleServiceDebugEntry> = emptyList()
+)

@@ -65,6 +65,16 @@
     <string name="preset">Preset</string>
     <string name="preset_load">Załaduj</string>
     <string name="preset_add_new">Dodaj nowy</string>
+    <string name="preset_export">Eksportuj</string>
+    <string name="preset_import">Importuj</string>
+    <string name="preset_export_title">Eksportuj presety</string>
+    <string name="preset_import_title">Importuj presety</string>
+    <string name="preset_none_selected">Nic nie zaznaczono</string>
+    <string name="preset_export_done">Wyeksportowano presety</string>
+    <string name="preset_export_failed">Eksport nie powiódł się</string>
+    <string name="preset_import_failed">Nie można odczytać pliku</string>
+    <string name="preset_import_empty">Brak presetów w pliku</string>
+    <string name="preset_import_done">Zaimportowano %d preset(ów)</string>
     <string name="reset">Reset</string>
     <string name="live_data">Live Data</string>
     <string name="refresh">Odśwież</string>

@@ -68,6 +68,45 @@ class MainFragment : Fragment() {
             viewModel.startRideLogging(uri)
         }
 
+    private var pendingExportJson: String? = null
+
+    private val presetExportPicker =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+            val json = pendingExportJson
+            pendingExportJson = null
+            if (uri == null || json == null) return@registerForActivityResult
+            try {
+                requireContext().contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(json.toByteArray(Charsets.UTF_8))
+                } ?: throw IllegalStateException("openOutputStream returned null")
+                Toast.makeText(requireContext(), R.string.preset_export_done, Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Preset export failed", e)
+                Toast.makeText(requireContext(), R.string.preset_export_failed, Toast.LENGTH_SHORT).show()
+            }
+        }
+
+    private val presetImportPicker =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) return@registerForActivityResult
+            val json = try {
+                requireContext().contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            } catch (e: Exception) {
+                Log.e(TAG, "Preset import read failed", e)
+                null
+            }
+            if (json == null) {
+                Toast.makeText(requireContext(), R.string.preset_import_failed, Toast.LENGTH_SHORT).show()
+                return@registerForActivityResult
+            }
+            val presets = presetManager.parsePresetsJson(json)
+            if (presets.isEmpty()) {
+                Toast.makeText(requireContext(), R.string.preset_import_empty, Toast.LENGTH_SHORT).show()
+                return@registerForActivityResult
+            }
+            showImportSelectionDialog(presets)
+        }
+
     private var editablePersonalizedInfo: PersonalizedInfo? = null
     private var originalPersonalizedInfo: PersonalizedInfo? = null
     private var autoPersonalizedRequested = false
@@ -85,9 +124,7 @@ class MainFragment : Fragment() {
     private data class AssistLevel(
         val gearIndex: Int,
         val labelRes: Int,
-        val colorRes: Int,
-        val badgeTextColorRes: Int,
-        val labelTextColorRes: Int
+        val colorRes: Int
     )
 
     private companion object {
@@ -95,11 +132,11 @@ class MainFragment : Fragment() {
         private const val TAG = "MainFragment"
 
         private val ASSIST_LEVELS = listOf(
-            AssistLevel(2, R.string.level_e, R.color.level_e, R.color.text_primary, R.color.text_primary),
-            AssistLevel(4, R.string.level_t, R.color.level_t, R.color.text_primary, R.color.text_primary),
-            AssistLevel(6, R.string.level_s, R.color.level_s, R.color.text_primary, R.color.white),
-            AssistLevel(8, R.string.level_sp, R.color.level_sp, R.color.text_primary, R.color.white),
-            AssistLevel(9, R.string.level_b, R.color.level_b, R.color.text_primary, R.color.white)
+            AssistLevel(2, R.string.level_e, R.color.level_e),
+            AssistLevel(4, R.string.level_t, R.color.level_t),
+            AssistLevel(6, R.string.level_s, R.color.level_s),
+            AssistLevel(8, R.string.level_sp, R.color.level_sp),
+            AssistLevel(9, R.string.level_b, R.color.level_b)
         )
     }
 
@@ -244,7 +281,7 @@ class MainFragment : Fragment() {
                 .show()
         }
 
-        binding.presetButton.setOnClickListener {
+        binding.presetNavButton.setOnClickListener {
             showPresetDialog()
         }
 
@@ -321,7 +358,12 @@ class MainFragment : Fragment() {
         )
 
         val hasInfo = editablePersonalizedInfo != null
-        binding.presetButton.isEnabled = hasInfo
+        setPresetButtonEnabled(hasInfo)
+    }
+
+    private fun setPresetButtonEnabled(enabled: Boolean) {
+        binding.presetNavButton.isEnabled = enabled
+        binding.presetNavButton.alpha = if (enabled) 1f else 0.4f
     }
 
     private fun hasConnectPermission(): Boolean {
@@ -410,6 +452,8 @@ class MainFragment : Fragment() {
             .inflate(R.layout.dialog_preset_list, null)
         val container = dialogView.findViewById<LinearLayout>(R.id.presetListContainer)
         val addButton = dialogView.findViewById<Button>(R.id.addPresetButton)
+        val exportButton = dialogView.findViewById<Button>(R.id.exportPresetsButton)
+        val importButton = dialogView.findViewById<Button>(R.id.importPresetsButton)
         val px = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1f, resources.displayMetrics)
         var dialog: AlertDialog? = null
 
@@ -515,10 +559,71 @@ class MainFragment : Fragment() {
             showPresetSaveDialog(info, dialog)
         }
 
+        exportButton.setOnClickListener {
+            if (names.isEmpty()) {
+                Toast.makeText(requireContext(), R.string.no_presets, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            dialog?.dismiss()
+            showExportSelectionDialog()
+        }
+
+        importButton.setOnClickListener {
+            dialog?.dismiss()
+            presetImportPicker.launch(arrayOf("application/json", "text/*", "application/octet-stream"))
+        }
+
         dialog = AlertDialog.Builder(requireContext())
             .setTitle(R.string.preset)
             .setView(dialogView)
             .setPositiveButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showExportSelectionDialog() {
+        val names = presetManager.getPresetNames()
+        if (names.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.no_presets, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val items = names.toTypedArray()
+        val checked = BooleanArray(items.size) { true }
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.preset_export_title)
+            .setMultiChoiceItems(items, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton(R.string.preset_export) { _, _ ->
+                val selected = items.filterIndexed { i, _ -> checked[i] }
+                if (selected.isEmpty()) {
+                    Toast.makeText(requireContext(), R.string.preset_none_selected, Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                pendingExportJson = presetManager.exportPresetsToJson(selected)
+                presetExportPicker.launch("bafang_presets.json")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showImportSelectionDialog(presets: List<AssistPreset>) {
+        val items = presets.map { it.name }.toTypedArray()
+        val checked = BooleanArray(items.size) { true }
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.preset_import_title)
+            .setMultiChoiceItems(items, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton(R.string.preset_import) { _, _ ->
+                val selected = presets.filterIndexed { i, _ -> checked[i] }
+                if (selected.isEmpty()) {
+                    Toast.makeText(requireContext(), R.string.preset_none_selected, Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val count = presetManager.importPresets(selected)
+                Toast.makeText(
+                    requireContext(),
+                    getString(R.string.preset_import_done, count),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
@@ -821,8 +926,7 @@ class MainFragment : Fragment() {
             bindMainBottomGlobalSliders(editablePersonalizedInfo!!)
             binding.bottomGlobalTitleText.visibility = View.VISIBLE
             binding.bottomGlobalControlsLayout.visibility = View.VISIBLE
-            binding.presetButtonLayout.visibility = View.VISIBLE
-            binding.presetButton.isEnabled = true
+            setPresetButtonEnabled(true)
             binding.updateNavButton.isEnabled = true
             if (!isSystemInfoVisible) {
                 binding.assistChart.visibility = View.VISIBLE
@@ -842,7 +946,7 @@ class MainFragment : Fragment() {
             binding.mainAssistLevelsContainer.removeAllViews()
             binding.bottomGlobalTitleText.visibility = View.GONE
             binding.bottomGlobalControlsLayout.visibility = View.GONE
-            binding.presetButtonLayout.visibility = View.GONE
+            setPresetButtonEnabled(false)
             binding.assistChart.visibility = View.GONE
             return
         }
@@ -866,8 +970,7 @@ class MainFragment : Fragment() {
         bindMainBottomGlobalSliders(editablePersonalizedInfo!!)
         binding.bottomGlobalTitleText.visibility = View.VISIBLE
         binding.bottomGlobalControlsLayout.visibility = View.VISIBLE
-        binding.presetButtonLayout.visibility = View.VISIBLE
-        binding.presetButton.isEnabled = true
+        setPresetButtonEnabled(true)
         binding.updateNavButton.isEnabled = true
         if (!isSystemInfoVisible) {
             binding.assistChart.visibility = View.VISIBLE
@@ -915,7 +1018,8 @@ class MainFragment : Fragment() {
 
             setRoundedBg(row.findViewById(R.id.levelRowRoot), level.colorRes, 12f)
 
-            val labelTextColor = ContextCompat.getColor(requireContext(), level.labelTextColorRes)
+            // Jednolity, bialy tekst etykiet na kazdym poziomie (tla sa stonowane pod biel)
+            val labelTextColor = ContextCompat.getColor(requireContext(), R.color.white)
             row.findViewById<TextView>(R.id.assistLevelLabel).setTextColor(labelTextColor)
             row.findViewById<TextView>(R.id.motorPowerLabel).setTextColor(labelTextColor)
 

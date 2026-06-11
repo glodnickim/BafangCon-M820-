@@ -16,10 +16,11 @@
     <color name="danger">#FFC33A2B</color>
     <color name="connected_green">#FF4CAF50</color>
 
-    <color name="level_e">#FF4CAF50</color>
-    <color name="level_t">#FF03A9F4</color>
+    <!-- Stonowane odcienie, by bialy tekst byl czytelny na kazdej karcie -->
+    <color name="level_e">#FF2E7D32</color>
+    <color name="level_t">#FF0277BD</color>
     <color name="level_s">#FF1A237E</color>
-    <color name="level_sp">#FFF44336</color>
+    <color name="level_sp">#FFC62828</color>
     <color name="level_b">#FF9C27B0</color>
     <color name="slider_orange">#FF9800</color>
 </resources>

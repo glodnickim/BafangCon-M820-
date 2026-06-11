@@ -99,6 +99,9 @@
                         android:valueTo="100"
                         android:stepSize="1"
                         app:labelBehavior="gone"
+                        app:thumbColor="@color/slider_orange"
+                        app:trackColorActive="@color/slider_orange"
+                        app:trackColorInactive="#FFD5B3"
                         tools:value="20" />
                 </LinearLayout>
 
@@ -136,6 +139,9 @@
                     android:valueTo="8"
                     android:stepSize="1"
                     app:labelBehavior="gone"
+                    app:thumbColor="@color/slider_orange"
+                    app:trackColorActive="@color/slider_orange"
+                    app:trackColorInactive="#FFD5B3"
                     tools:value="4" />
             </LinearLayout>
 
@@ -212,6 +218,9 @@
                     android:valueTo="8"
                     android:stepSize="1"
                     app:labelBehavior="gone"
+                    app:thumbColor="@color/slider_orange"
+                    app:trackColorActive="@color/slider_orange"
+                    app:trackColorInactive="#FFD5B3"
                     tools:value="4" />
             </LinearLayout>
         </LinearLayout>

@@ -3,6 +3,7 @@ package com.test.bafangcon
 import android.content.Context
 import android.content.SharedPreferences
 import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 
 class PresetManager(context: Context) {
 
@@ -73,6 +74,52 @@ class PresetManager(context: Context) {
         savePreset(preset1)
         savePreset(preset2)
     }
+
+    /** Serializuje wybrane presety (po nazwach) do tablicy JSON. */
+    fun exportPresetsToJson(names: List<String>): String {
+        val presets = names.mapNotNull { loadPreset(it) }
+        return gson.toJson(presets)
+    }
+
+    /** Parsuje presety z pliku JSON. Akceptuje tablice presetow oraz pojedynczy preset. */
+    fun parsePresetsJson(json: String): List<AssistPreset> {
+        val parsed = try {
+            val type = object : TypeToken<List<AssistPreset>>() {}.type
+            gson.fromJson<List<AssistPreset>>(json, type) ?: emptyList()
+        } catch (e: Exception) {
+            try {
+                gson.fromJson(json, AssistPreset::class.java)?.let { listOf(it) } ?: emptyList()
+            } catch (e2: Exception) {
+                emptyList()
+            }
+        }
+        return parsed.filter { isValidPreset(it) }
+    }
+
+    /** Dodaje presety, rozwiazujac konflikty nazw sufiksem "(n)". Zwraca liczbe dodanych. */
+    fun importPresets(presets: List<AssistPreset>): Int {
+        var added = 0
+        for (preset in presets) {
+            savePreset(preset.copy(name = uniqueName(preset.name)))
+            added++
+        }
+        return added
+    }
+
+    private fun uniqueName(base: String): String {
+        if (!presetExists(base)) return base
+        var i = 2
+        while (presetExists("$base ($i)")) i++
+        return "$base ($i)"
+    }
+
+    @Suppress("SENSELESS_COMPARISON")
+    private fun isValidPreset(p: AssistPreset): Boolean =
+        p != null && p.name != null && p.name.isNotBlankSafe() &&
+            p.gearSpeedLimit != null && p.gearCurrentLimit != null &&
+            p.motorStartingAngle != null && p.accelerationSettings != null
+
+    private fun String?.isNotBlankSafe(): Boolean = this != null && this.isNotBlank()
 
     private fun presetKey(name: String): String = "preset_$name"
 
