@@ -59,7 +59,7 @@
             app:backgroundTint="@color/nav_icon"
             app:cornerRadius="8dp"
             app:icon="@drawable/ic_preset_24"
-            app:iconGravity="center"
+            app:iconGravity="top"
             app:iconPadding="0dp"
             app:iconSize="24dp"
             app:iconTint="@color/white" />
