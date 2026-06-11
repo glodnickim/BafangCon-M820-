@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # FT Bafang M820
 
 Android app for Bafang M820 / CAN displays running **Fake Taxi** firmware.
@@ -7,21 +6,21 @@ and allows editing assist parameters. Works offline — no internet connection r
 
 The app has been tested with **DPC245 v3** display and **Fake Taxi 2026.05.22** firmware.
 
-## Current Status — v0.042
+## Current Status — v0.054
 
 - **AA55/NUS** — primary working transport. Stable BLE scan, connection, authentication, data read/write.
-- **CAN BLE** — model classes created (`canble/model/`), transport not yet implemented.
+- **CAN BLE** — transport layer implemented (`canble/transport/`), state machine and frame handling.
 - **Ride logging** — CSV via SAF folder picker with 28 telemetry fields.
-- **Language** — Polish and English interface support.
-- **Next:** CAN BLE crypto, frame extraction, filtering, and logging (Phase 1 Core).
+- **Presets** — save/load assist configurations with dialog picker.
+- **UI** — Polish and English support, styled Material Design buttons and sliders.
 
 ## Current Focus
 
 - Bafang M820 with DP C245-30.CAN style BLE display.
 - BLE connection through Nordic UART Service (NUS) and AA55 protocol frames with AES authentication.
-- CAN BLE service (passive read-only telemetry, in development).
+- CAN BLE service with transport state machine and raw frame logging.
 - Assist profile read/write and preset save/load.
-- System tab for protocol data inspection.
+- System tab for protocol data inspection and debug logging.
 - Ride logging to CSV for analysis.
 - Charts showing assist levels (MPAndroidChart + custom Canvas).
 
@@ -33,7 +32,7 @@ The app has been tested with **DPC245 v3** display and **Fake Taxi 2026.05.22** 
 - Edit assist profile values used by the controller.
 - Write assist, controller, and meter settings.
 - Show live values: speed, current, voltage, SOC, cadence, gear, temperatures.
-- Acceleration and start angle adjustment.
+- Acceleration and start angle adjustment with styled sliders.
 - Assist presets — save and load custom user settings.
 - Log ride telemetry to CSV.
 - Charts: assist curve visualization, gear comparison.
@@ -53,19 +52,11 @@ ride-YYYYMMDD-HHMMSS.csv
 
 Logged values include:
 
-- speed
-- current
-- voltage
-- calculated power
-- controller SOC
-- assist level
-- cadence
-- torque raw value
-- controller and motor temperature
-- boost state
-- speed limit
-- wheel/crank counters
-- last known battery SOC, voltage, current and temperature
+- speed, current, voltage, calculated power
+- controller SOC, assist level, cadence
+- torque raw value, controller and motor temperature
+- boost state, speed limit, wheel/crank counters
+- battery SOC, voltage, current, temperature
 - raw A3 telemetry bytes
 
 Pressing `Stop` closes the current CSV file.
@@ -92,18 +83,18 @@ next version.
 
 Example:
 
-- copied APK: `Bafang FT M820 v0.042.apk`
-- `version.properties` after build: `0.043`
-- published version: `v0.042`
+- copied APK: `Bafang FT M820 v0.054.apk`
+- `version.properties` after build: `0.055`
+- published version: `v0.054`
 
 ## Project Files
 
 - `app/src/main/java/com/test/bafangcon/BleRepository.kt` — BLE connection, auth, frame parsing, logging.
-- `app/src/main/java/com/test/bafangcon/canble/` — CAN BLE model classes and future transport.
-- `app/src/main/java/com/test/bafangcon/RideTelemetrySample.kt` — CSV telemetry sample model.
+- `app/src/main/java/com/test/bafangcon/canble/` — CAN BLE transport and model classes.
 - `app/src/main/java/com/test/bafangcon/MainFragment.kt` — main UI, Log/Stop button, folder picker.
+- `app/src/main/java/com/test/bafangcon/PresetManager.kt` — preset save/load functionality.
+- `app/src/main/res/layout/` — Material Design UI layouts.
 - `version.properties` — next version used by the build.
-- `CHANGELOG.md` — user-visible history of releases.
 - `build-app.ps1` — release build script (bumps version, copies APK).
 
 ## Documentation
@@ -114,30 +105,11 @@ The repository contains a `docs/` directory with project and protocol documentat
 |---|---|
 | `PROJECT_STATUS.md` | Current version, features, risks, build status |
 | `CURRENT_ARCHITECTURE.md` | Full architecture diagram, BLE and AA55 flow, CAN BLE place |
-| `ROADMAP.md` | Version roadmap (v0.041 → future) |
+| `ROADMAP.md` | Version roadmap (v0.054 → future) |
 | `DECISIONS.md` | All architectural decisions with rationale |
-| `CAN_BLE_PHASE1_PLAN.md` | Detailed Phase 1 implementation plan |
 | `CONTRIBUTING.md` | Branch strategy, commit naming, PR workflow, code style |
-| `RELEASE_PROCESS.md` | Step-by-step release workflow with version history |
-| `DOCUMENTATION_WORKFLOW.md` | How to document while coding |
-| `RELEASE_CHECKLIST.md` | Checks before publishing APK |
-| `RELEASE_NOTES_TEMPLATE.md` | Template for public release notes |
-| `CANABLE_LOG_ANALYSIS.md` | CAN bus log analysis notes |
 
 ### Protocol Docs
 
-- `docs/komunikacja-dp-c245.md`
-- `docs/bafang-protocol-logic-junior.md`
-=======
-`FT Bafang APP M820` is an Android app for BLE communication with a Bafang M820 motor running the custom `Fake Taxi` firmware. It allows the user to connect to the bike, read system information and configure basic assist parameters. The available functions are mapped and organized to make motor setup and tuning easier. The app works locally and does not require an internet connection.
-Main features:
-- Bluetooth LE scanning and connection,
-- authentication compatible with the Fake Taxi protocol,
-- reading controller, display, battery and sensor information,
-- assist configuration: speed and current/power limits,
-- charts showing assist levels,
-- acceleration and start angle adjustment,
-- presets with the option to save and load custom user settings,
-- Polish and English language support.
-The app is intended for `Bafang M820` with `Fake Taxi 2026.05.22` firmware. It has been tested only with the `DPC245 v3` display. 
->>>>>>> origin/master
+- `docs/komunikacja-dp-c245.md` — DP C245 communication protocol
+- `docs/bafang-protocol-logic-junior.md` — Bafang protocol analysis
