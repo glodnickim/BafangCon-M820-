@@ -47,12 +47,13 @@ class RecordedCanSession(private val sessionId: String = defaultSessionId()) {
         encryptedHex: String,
         decryptedHex: String,
         uuid: java.util.UUID,
-        aUMode: Int
+        aUMode: Int,
+        timestampMs: Long = System.currentTimeMillis()
     ) {
         if (!isRecording) return
         notifications.add(
             RecordedCanNotification(
-                timestampMs = System.currentTimeMillis(),
+                timestampMs = timestampMs,
                 encryptedHex = encryptedHex,
                 decryptedHex = decryptedHex,
                 sourceUuid = uuid.toString(),

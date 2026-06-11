@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.Lifecycle
@@ -20,6 +21,11 @@ class SystemInfoFragment : Fragment() {
     private val viewModel: DeviceViewModel by activityViewModels()
 
     private lateinit var adapter: SystemInfoAdapter
+    private var toggleDeadBlocksButton: Button? = null
+
+    // Bloki, które w logu (aa55_raw_*.log) były całe zerowe = martwe.
+    // Domyślnie ukryte, odkrywane przyciskiem na dole ekranu System.
+    private var showDeadBlocks = false
 
     private var currentBattery: BatteryInfo? = null
     private var currentSensor: SensorInfo? = null
@@ -27,6 +33,9 @@ class SystemInfoFragment : Fragment() {
     private var currentIotCan: IotCanInfo? = null
     private var currentController: ControllerInfo? = null
     private var currentMeter: MeterInfo? = null
+    private var currentCanBleDebug = CanBleDebugInfo()
+    private var currentAa55RawStats = Aa55RawStats()
+    private var currentBleRawStats = BleRawNotificationStats()
     private var currentPersonalized: PersonalizedInfo? = null
 
     override fun onCreateView(
@@ -41,7 +50,21 @@ class SystemInfoFragment : Fragment() {
         adapter = SystemInfoAdapter()
         recyclerView.adapter = adapter
 
+        toggleDeadBlocksButton = view.findViewById<Button>(R.id.toggleDeadBlocksButton).apply {
+            setOnClickListener {
+                showDeadBlocks = !showDeadBlocks
+                updateToggleButtonText()
+                rebuildSections()
+            }
+        }
+        updateToggleButtonText()
+
         return view
+    }
+
+    private fun updateToggleButtonText() {
+        toggleDeadBlocksButton?.text =
+            if (showDeadBlocks) "Ukryj nieaktywne bloki" else "Pokaż nieaktywne bloki"
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
@@ -56,6 +79,9 @@ class SystemInfoFragment : Fragment() {
                 launch { viewModel.controllerInfo.collect { currentController = it; rebuildSections() } }
                 launch { viewModel.meterInfo.collect { currentMeter = it; rebuildSections() } }
                 launch { viewModel.personalizedInfo.collect { currentPersonalized = it; rebuildSections() } }
+                launch { viewModel.canBleDebug.collect { currentCanBleDebug = it; rebuildSections() } }
+                launch { viewModel.aa55RawStats.collect { currentAa55RawStats = it; rebuildSections() } }
+                launch { viewModel.bleRawNotificationStats.collect { currentBleRawStats = it; rebuildSections() } }
             }
         }
 
@@ -78,6 +104,7 @@ class SystemInfoFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        toggleDeadBlocksButton = null
         _view = null
     }
 
@@ -169,7 +196,7 @@ class SystemInfoFragment : Fragment() {
             sections.add(SystemInfoSection("Personalized (A9)", items))
         }
 
-        if (currentBattery != null) {
+        if (showDeadBlocks && currentBattery != null) {
             val b = currentBattery!!
             val items = mutableListOf(
                 SystemInfoItem("Model", b.model),
@@ -190,7 +217,7 @@ class SystemInfoFragment : Fragment() {
             sections.add(SystemInfoSection("Battery", items))
         }
 
-        if (currentSensor != null) {
+        if (showDeadBlocks && currentSensor != null) {
             val s = currentSensor!!
             val items = mutableListOf(
                 SystemInfoItem("Model", s.model),
@@ -204,7 +231,7 @@ class SystemInfoFragment : Fragment() {
             sections.add(SystemInfoSection("Torque Sensor", items))
         }
 
-        if (currentIotConfig != null) {
+        if (showDeadBlocks && currentIotConfig != null) {
             val c = currentIotConfig!!
             val items = mutableListOf(
                 SystemInfoItem("Model", c.model),
@@ -220,7 +247,7 @@ class SystemInfoFragment : Fragment() {
             sections.add(SystemInfoSection("IOT Config (A1)", items))
         }
 
-        if (currentIotCan != null) {
+        if (showDeadBlocks && currentIotCan != null) {
             val c = currentIotCan!!
             val items = mutableListOf(
                 SystemInfoItem("BLE Model", c.bleModel.toString()),
@@ -233,6 +260,65 @@ class SystemInfoFragment : Fragment() {
             )
             sections.add(SystemInfoSection("IOT CAN (A2)", items))
         }
+
+        val debug = currentCanBleDebug
+        val canBleItems = listOf(
+            SystemInfoItem("Service Found", when (debug.serviceFound) {
+                true -> "YES"
+                false -> "NO"
+                null -> "UNKNOWN"
+            }),
+            SystemInfoItem("Transport State", debug.transportState),
+            SystemInfoItem("Handshake State", debug.handshakeState),
+            SystemInfoItem("Notifications", debug.notifications.toString()),
+            SystemInfoItem("Frames Accepted", debug.framesAccepted.toString()),
+            SystemInfoItem("Frames Filtered", debug.framesFiltered.toString()),
+            SystemInfoItem("Decrypt Failures", debug.decryptFailures.toString())
+        )
+        sections.add(SystemInfoSection("CAN BLE Debug", canBleItems))
+
+        if (debug.bleServicesDebug.isNotEmpty()) {
+            val serviceItems = mutableListOf<SystemInfoItem>()
+            debug.bleServicesDebug.forEachIndexed { i, entry ->
+                serviceItems.add(SystemInfoItem("Service ${i + 1}", entry.serviceUuid))
+                entry.characteristicUuids.forEach { charUuid ->
+                    serviceItems.add(SystemInfoItem("  Char", charUuid))
+                }
+            }
+            sections.add(SystemInfoSection("BLE Services Debug", serviceItems))
+        }
+
+        val aa55 = currentAa55RawStats
+        val aa55Items = mutableListOf(
+            SystemInfoItem("Logging", if (aa55.isLogging) "ON" else "OFF"),
+            SystemInfoItem("RX Frames", aa55.rxFrames.toString()),
+            SystemInfoItem("TX Frames", aa55.txFrames.toString()),
+            SystemInfoItem("Unknown Frames", aa55.unknownFrames.toString()),
+            SystemInfoItem("Last RX Command", aa55.lastRxCommand),
+            SystemInfoItem("Last TX Command", aa55.lastTxCommand),
+            SystemInfoItem("Last Frame Hex", aa55.lastFrameHex),
+            SystemInfoItem("File Write Errors", aa55.fileWriteErrors.toString())
+        )
+        if (aa55.currentLogFilePath.isNotEmpty()) {
+            aa55Items.add(1, SystemInfoItem("Log File", aa55.currentLogFilePath))
+        }
+        sections.add(SystemInfoSection("AA55 Raw Debug", aa55Items))
+
+        val bleRaw = currentBleRawStats
+        val bleRawItems = mutableListOf(
+            SystemInfoItem("Logging", if (bleRaw.loggingEnabled) "ON" else "OFF"),
+            SystemInfoItem("Total Notifications", bleRaw.totalNotifications.toString()),
+            SystemInfoItem("Total Bytes", bleRaw.totalBytes.toString()),
+            SystemInfoItem("Unique UUIDs", bleRaw.uniqueUuids.size.toString()),
+            SystemInfoItem("Last UUID", bleRaw.lastUuid),
+            SystemInfoItem("Last Length", bleRaw.lastLength.toString()),
+            SystemInfoItem("Last Raw Hex", bleRaw.lastRawHex),
+            SystemInfoItem("File Write Errors", bleRaw.fileWriteErrors.toString())
+        )
+        if (bleRaw.currentLogFilePath.isNotEmpty()) {
+            bleRawItems.add(1, SystemInfoItem("Log File", bleRaw.currentLogFilePath))
+        }
+        sections.add(SystemInfoSection("BLE Raw Debug", bleRawItems))
 
         if (sections.isEmpty()) {
             sections.add(SystemInfoSection("Info", listOf(SystemInfoItem("No data", "Requesting..."))))

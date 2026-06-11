@@ -65,6 +65,16 @@
     <string name="preset">Preset</string>
     <string name="preset_load">Load</string>
     <string name="preset_add_new">Add new preset</string>
+    <string name="preset_export">Export</string>
+    <string name="preset_import">Import</string>
+    <string name="preset_export_title">Export presets</string>
+    <string name="preset_import_title">Import presets</string>
+    <string name="preset_none_selected">Nothing selected</string>
+    <string name="preset_export_done">Presets exported</string>
+    <string name="preset_export_failed">Export failed</string>
+    <string name="preset_import_failed">Could not read file</string>
+    <string name="preset_import_empty">No presets in file</string>
+    <string name="preset_import_done">Imported %d preset(s)</string>
     <string name="reset">Reset</string>
     <string name="ride_log_start">Log</string>
     <string name="ride_log_stop">Stop</string>
