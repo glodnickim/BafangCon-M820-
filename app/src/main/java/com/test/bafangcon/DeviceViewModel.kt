@@ -24,6 +24,7 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
 
     // --- Add StateFlows for parsed data ---
     val controllerInfo: StateFlow<ControllerInfo?> = bleRepository.controllerInfo
+    val realtimeInfo: StateFlow<RealtimeInfo?> = bleRepository.realtimeInfo
     val meterInfo: StateFlow<MeterInfo?> = bleRepository.meterInfo
     val personalizedInfo: StateFlow<PersonalizedInfo?> = bleRepository.personalizedInfo
     val batteryInfo: StateFlow<BatteryInfo?> = bleRepository.batteryInfo

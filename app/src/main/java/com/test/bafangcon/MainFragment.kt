@@ -828,49 +828,36 @@ class MainFragment : Fragment() {
         Log.d(TAG, "Auto-requesting Assist data for main screen.")
 
         autoRequestJob = viewLifecycleOwner.lifecycleScope.launch {
-            // Try fallback immediately if A3 data already arrived (from post-auth pre-fetch)
-            val ci = viewModel.controllerInfo.value
-            if (ci != null && ci.rawData != null && ci.gearSpeedLimit.any { it.toInt() != 0 }) {
-                Log.d(TAG, "A3 controller data already available, building synthetic PersonalizedInfo")
-                buildFromControllerFallback(ci)
-                return@launch
-            }
-
-            // Try A9 first (works on non-DP controllers)
-            var delayBeforeRetry = 500L
-            val maxDelay = 5000L
-            var keepTrying = true
-            var retryCount = 0
-            val maxRetries = 10
-            while (keepTrying && retryCount < maxRetries) {
-                retryCount++
-                kotlinx.coroutines.delay(delayBeforeRetry)
-                viewModel.requestPersonalizedInfoFresh()
-                val result = withTimeoutOrNull(DATA_WAIT_TIMEOUT_MS) {
-                    viewModel.personalizedInfo.first { it != null }
+            // Ponawiaj AŻ przyjdą SENSOWNE (niezerowe) dane. KLUCZOWE: w trybie boot licznik (HMI)
+            // odpowiada na A3/A9 SAMYMI ZERAMI (potwierdzone logiem aa55_raw). Wcześniej kod traktował
+            // zerowy, ale != null obiekt jako "gotowe" i przestawał pytać → ekran wisiał na "Ładowanie...".
+            // Teraz zerowe odpowiedzi ignorujemy i pytamy dalej, aż licznik wystanie i zwróci realne dane.
+            // Stały, krótki interwał (bez backoffu) — render jest reaktywny (collector renderuje
+            // w chwili przyjścia niezerowych danych), więc latencja = jak często pytamy. Licznik
+            // odpowiada w ~150 ms, więc odpytywanie co POLL_INTERVAL daje dane niemal natychmiast
+            // po zabootowaniu HMI, bez wrażenia "wisi".
+            val pollInterval = 400L
+            while (autoPersonalizedRequested && viewModel.authState.value == BleAuthState.AUTHENTICATED) {
+                // Mamy już sensowne A9 (personalized)? — collector je wyrenderuje, kończymy.
+                viewModel.personalizedInfo.value?.let { p ->
+                    if (p.gearSpeedLimit.any { it.toInt() != 0 } || p.gearCurrentLimit.any { it.toInt() != 0 }) {
+                        Log.d(TAG, "Personalized (A9) ma sensowne dane — koniec ponawiania.")
+                        return@launch
+                    }
                 }
-                if (result != null) {
-                    Log.d(TAG, "Personalized info received successfully.")
-                    return@launch
+                // Mamy sensowne A3 (controller)? — buduj syntetyczne PersonalizedInfo (fallback DP).
+                viewModel.controllerInfo.value?.let { ci ->
+                    if (ci.rawData != null && ci.gearSpeedLimit.any { it.toInt() != 0 }) {
+                        Log.d(TAG, "Controller (A3) ma sensowne dane — buduję fallback.")
+                        buildFromControllerFallback(ci)
+                        return@launch
+                    }
                 }
-                Log.w(TAG, "Personalized info timeout ($retryCount/$maxRetries), retrying in ${delayBeforeRetry}ms...")
-                delayBeforeRetry = (delayBeforeRetry * 2).coerceAtMost(maxDelay)
-                keepTrying = autoPersonalizedRequested
-            }
 
-            // Fallback: A9 didn't respond, try building from A3 controller data (DP C245)
-            Log.w(TAG, "A9 personalized info unavailable, falling back to A3 controller data")
-            if (viewModel.controllerInfo.value?.rawData == null) {
-                Log.d(TAG, "Requesting A3 controller data for fallback...")
+                // Wciąż zera/brak — poproś ponownie o A9 i A3 i poczekaj krótko.
+                viewModel.requestPersonalizedInfo()
                 viewModel.requestControllerInfo()
-                kotlinx.coroutines.delay(3000L)
-            }
-            val ci2 = viewModel.controllerInfo.value
-            if (ci2 != null && ci2.rawData != null) {
-                buildFromControllerFallback(ci2)
-            } else {
-                Log.e(TAG, "Fallback failed: no A3 controller data available either")
-                binding.assistSummaryTextView.text = getString(R.string.assist_summary_empty)
+                kotlinx.coroutines.delay(pollInterval)
             }
         }
     }
@@ -899,9 +886,11 @@ class MainFragment : Fragment() {
         if (!isInitialDataRenderComplete) {
             if (info == null) return
 
-            // Check for all-zero data (e.g. empty A3 response)
+            // Dane całkowicie zerowe = licznik jeszcze nie gotowy (boot). Nie renderuj zer i NIE
+            // ustawiaj editablePersonalizedInfo — trzymaj "Ładowanie...", aż pętla doprosi realne dane.
+            // (Wcześniej po 3 zerach renderowało "Nie udało się odczytać" i blokowało dalsze ponawianie.)
             val allZero = isAllVisibleDataZero(info)
-            if (allZero && zeroDataRetryCount < 3) {
+            if (allZero) {
                 zeroDataRetryCount++
                 return
             }

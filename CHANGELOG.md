@@ -31,6 +31,41 @@ Use this format:
 ### Fixed
 - Nothing yet.
 
+## v0.063 - 2026-06-14
+
+### Added
+- Realtime telemetry from the display's `0x06` broadcast frame (~0.7 s cadence):
+  torque sensor, SOC, assist level, remaining range, odometer/trip. Shown in the
+  System tab under "Realtime (0x06)", with raw fields exposed for ongoing
+  reverse-engineering.
+- System tab: rows that stay static during a ride ("dead" blocks) are hidden by
+  default, with a "Show inactive blocks" toggle.
+- On-screen crash reporter: uncaught exceptions are displayed full-screen with the
+  stack trace (diagnostic aid for field testing without adb).
+- Build: `-Mode clean-release` in `build-app.ps1` for a clean, signed release build.
+
+### Changed
+- Authentication retries the challenge read for up to 45 s (every 2.5 s), so
+  connecting before the display has finished booting still succeeds.
+- Assist data loading polls the controller (A3) and personalized (A9) blocks until
+  real, non-zero data arrives instead of giving up — the display answers with all
+  zeros while it is still booting.
+
+### Fixed
+- Startup crash in release builds caused by R8 stripping (hardened ProGuard keep rules).
+- Crash when opening the main screen (`NoSuchFieldError: presetNavButton`) caused by a
+  stale incremental build; resolved with a clean release build.
+- App hanging on "Loading…" when connecting during display boot — assist data now loads
+  automatically once the display responds (previously needed a manual log-view toggle).
+- BLE command queue could stall on a write that never ACKed; added a write-ACK timeout
+  watchdog that unblocks the queue.
+
+### Known Issues
+- The on-screen crash reporter is a temporary diagnostic aid and will be removed once
+  the build is confirmed stable.
+- Battery/sensor/IoT blocks are read once after authentication; if read during display
+  boot they may show zeros until the next manual refresh.
+
 ## v0.040 - 2026-06-05
 
 ### Added

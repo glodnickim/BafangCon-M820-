@@ -6,13 +6,19 @@ and allows editing assist parameters. Works offline — no internet connection r
 
 The app has been tested with **DPC245 v3** display and **Fake Taxi 2026.05.22** firmware.
 
-## Current Status — v0.054
+## Current Status — v0.063
 
 - **AA55/NUS** — primary working transport. Stable BLE scan, connection, authentication, data read/write.
+- **Resilient connect** — patient authentication and assist-data loading that survive connecting
+  while the display is still booting (the display answers with zeros until it is ready).
+- **Realtime telemetry** — parses the display's `0x06` broadcast (torque, SOC, range, odometer/trip);
+  visible in the System tab.
 - **CAN BLE** — transport layer implemented (`canble/transport/`), state machine and frame handling.
 - **Ride logging** — CSV via SAF folder picker with 28 telemetry fields.
 - **Presets** — save/load assist configurations with dialog picker.
 - **UI** — Polish and English support, styled Material Design buttons and sliders.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full per-release history.
 
 ## Current Focus
 

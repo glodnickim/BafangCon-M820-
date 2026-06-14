@@ -15,7 +15,7 @@ an interactive menu. You can also call it directly, for example:
 
 [CmdletBinding()]
 param(
-    [ValidateSet("menu", "debug", "clean", "log", "clean-log", "install", "release", "check")]
+    [ValidateSet("menu", "debug", "clean", "log", "clean-log", "install", "release", "clean-release", "check")]
     [string]$Mode = "release"
 )
 
@@ -313,6 +313,7 @@ try {
         "clean-log" { Invoke-GradleTasks -Tasks @("clean", ":app:assembleDebug") -SaveLog $true }
         "install" { Install-DebugApk }
         "release" { Ensure-ReleaseKeystore; Invoke-GradleTasks -Tasks @(":app:assembleRelease") -SaveLog $false }
+        "clean-release" { Ensure-ReleaseKeystore; Invoke-GradleTasks -Tasks @("clean", ":app:assembleRelease") -SaveLog $false }
         "check" { Write-Host ""; Write-Host "Build environment check completed." -ForegroundColor Green }
     }
 } catch {

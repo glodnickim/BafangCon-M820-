@@ -32,6 +32,7 @@ class SystemInfoFragment : Fragment() {
     private var currentIotConfig: IotConfigInfo? = null
     private var currentIotCan: IotCanInfo? = null
     private var currentController: ControllerInfo? = null
+    private var currentRealtime: RealtimeInfo? = null
     private var currentMeter: MeterInfo? = null
     private var currentCanBleDebug = CanBleDebugInfo()
     private var currentAa55RawStats = Aa55RawStats()
@@ -77,6 +78,7 @@ class SystemInfoFragment : Fragment() {
                 launch { viewModel.iotConfigInfo.collect { currentIotConfig = it; rebuildSections() } }
                 launch { viewModel.iotCanInfo.collect { currentIotCan = it; rebuildSections() } }
                 launch { viewModel.controllerInfo.collect { currentController = it; rebuildSections() } }
+                launch { viewModel.realtimeInfo.collect { currentRealtime = it; rebuildSections() } }
                 launch { viewModel.meterInfo.collect { currentMeter = it; rebuildSections() } }
                 launch { viewModel.personalizedInfo.collect { currentPersonalized = it; rebuildSections() } }
                 launch { viewModel.canBleDebug.collect { currentCanBleDebug = it; rebuildSections() } }
@@ -124,32 +126,34 @@ class SystemInfoFragment : Fragment() {
             )
             sections.add(SystemInfoSection("Controller Identity (A3)", identityItems))
 
+            // Pola A3 oznaczone dead=true były w logu jazdy stałe/zerowe (A3 na M820 nie niesie
+            // żywego obciążenia). Realne dane na żywo pochodzą z ramki 0x06 (sekcja Realtime niżej).
             val liveItems = mutableListOf(
                 SystemInfoItem("SOC", "${c.soc}%"),
-                SystemInfoItem("Speed", String.format("%.1f km/h", c.speed * 0.01)),
-                SystemInfoItem("Current", String.format("%.2f A", c.electricCurrent * 0.01)),
+                SystemInfoItem("Speed", String.format("%.1f km/h", c.speed * 0.01), dead = true),
+                SystemInfoItem("Current", String.format("%.2f A", c.electricCurrent * 0.01), dead = true),
                 SystemInfoItem("Voltage", String.format("%.2f V", c.voltage * 0.01)),
-                SystemInfoItem("Power", String.format("%.1f W", c.voltage * 0.01 * c.electricCurrent * 0.01)),
-                SystemInfoItem("Cadence", "${c.cadence} RPM"),
-                SystemInfoItem("Torque Raw", c.moment.toString()),
-                SystemInfoItem("Controller Temp", "${c.controllerTemperature} °C"),
-                SystemInfoItem("Motor Temp", if (c.motorTemperature > 200) "N/A" else "${c.motorTemperature} °C"),
-                SystemInfoItem("Boost", if (c.boostState != 0) "ON" else "OFF"),
+                SystemInfoItem("Power", String.format("%.1f W", c.voltage * 0.01 * c.electricCurrent * 0.01), dead = true),
+                SystemInfoItem("Cadence", "${c.cadence} RPM", dead = true),
+                SystemInfoItem("Torque Raw", c.moment.toString(), dead = true),
+                SystemInfoItem("Controller Temp", "${c.controllerTemperature} °C", dead = true),
+                SystemInfoItem("Motor Temp", if (c.motorTemperature > 200) "N/A" else "${c.motorTemperature} °C", dead = true),
+                SystemInfoItem("Boost", if (c.boostState != 0) "ON" else "OFF", dead = true),
                 SystemInfoItem("Gear", "${c.currentGear}/${c.totalGear}")
             )
             sections.add(SystemInfoSection("Controller Live (A3)", liveItems))
 
             val telemetryItems = mutableListOf(
-                SystemInfoItem("Single Mileage Raw", c.singleMileage.toString()),
-                SystemInfoItem("Total Mileage Raw", c.totalMileage.toString()),
+                SystemInfoItem("Single Mileage Raw", c.singleMileage.toString(), dead = true),
+                SystemInfoItem("Total Mileage Raw", c.totalMileage.toString(), dead = true),
                 SystemInfoItem("Remaining Mileage Raw", c.emainingMileage.toString()),
-                SystemInfoItem("Calories", c.calories.toString()),
-                SystemInfoItem("Wheel Speed", c.wheelSpeed.toString()),
-                SystemInfoItem("Wheel Counter", c.wheelCounter.toString()),
-                SystemInfoItem("Last Sensor Time", c.lastTestSenserTime.toString()),
-                SystemInfoItem("Crank Pulse Counter", c.crankCadencePulseCounter.toString()),
-                SystemInfoItem("Motor Var Speed Master Gear", c.motorVariableSpeedMasterGear.toString()),
-                SystemInfoItem("Motor Speed Current Gear", c.motorSpeedCurrentGear.toString())
+                SystemInfoItem("Calories", c.calories.toString(), dead = true),
+                SystemInfoItem("Wheel Speed", c.wheelSpeed.toString(), dead = true),
+                SystemInfoItem("Wheel Counter", c.wheelCounter.toString(), dead = true),
+                SystemInfoItem("Last Sensor Time", c.lastTestSenserTime.toString(), dead = true),
+                SystemInfoItem("Crank Pulse Counter", c.crankCadencePulseCounter.toString(), dead = true),
+                SystemInfoItem("Motor Var Speed Master Gear", c.motorVariableSpeedMasterGear.toString(), dead = true),
+                SystemInfoItem("Motor Speed Current Gear", c.motorSpeedCurrentGear.toString(), dead = true)
             )
             sections.add(SystemInfoSection("Controller Telemetry (A3 160..207)", telemetryItems))
 
@@ -168,6 +172,37 @@ class SystemInfoFragment : Fragment() {
             )
             sections.add(SystemInfoSection("Controller Settings (A3)", settingsItems))
 
+        }
+
+        // --- Telemetria na żywo z ramki broadcast 0x06 (realne dane, w przeciwieństwie do A3) ---
+        currentRealtime?.let { rt ->
+            val decoded = mutableListOf(
+                SystemInfoItem("Torque (czujnik momentu)", "${rt.torqueRaw} / 4095"),
+                SystemInfoItem("SOC", "${rt.soc}%"),
+                SystemInfoItem("Assist / Gear", "${rt.assistLevel} (z ${rt.totalGears})"),
+                SystemInfoItem("Range", rt.rangeKm?.let { String.format("~%.1f km", it) } ?: "N/A"),
+                SystemInfoItem("Odometer", String.format("~%.1f km (raw %d)", rt.odometerKm, rt.odometerRaw)),
+                SystemInfoItem("Trip", String.format("~%.1f km (raw %d)", rt.tripKm, rt.tripRaw))
+            )
+            sections.add(SystemInfoSection("Realtime (0x06)", decoded))
+
+            // Surowe pola — do analizy na żywo w przyszłości (kadencja/prąd ujawnią się przy jeździe
+            // z czujnikami). Ukryte domyślnie, widoczne po "Pokaż nieaktywne bloki".
+            val raw = listOf(
+                SystemInfoItem("u16@9 torque", rt.torqueRaw.toString(), dead = true),
+                SystemInfoItem("u16@11 odometer", rt.odometerRaw.toString(), dead = true),
+                SystemInfoItem("u16@15 trip", rt.tripRaw.toString(), dead = true),
+                SystemInfoItem("u16@17 range", rt.remainingRangeRaw.toString(), dead = true),
+                SystemInfoItem("u16@19 (nieznane)", rt.field19Raw.toString(), dead = true),
+                SystemInfoItem("u16@21 licznik A", rt.counterA.toString(), dead = true),
+                SystemInfoItem("u16@28 licznik B", rt.counterB.toString(), dead = true),
+                SystemInfoItem("b5 assist/gear", rt.assistLevel.toString(), dead = true),
+                SystemInfoItem("b6 total gears", rt.totalGears.toString(), dead = true),
+                SystemInfoItem("b7 SOC", rt.soc.toString(), dead = true),
+                SystemInfoItem("b35 (bateryjne?)", rt.battByte35.toString(), dead = true),
+                SystemInfoItem("payload hex", rt.rawHex, dead = true)
+            )
+            sections.add(SystemInfoSection("0x06 Raw Fields", raw))
         }
 
         if (currentMeter != null) {
@@ -324,7 +359,15 @@ class SystemInfoFragment : Fragment() {
             sections.add(SystemInfoSection("Info", listOf(SystemInfoItem("No data", "Requesting..."))))
         }
 
-        adapter.updateData(sections)
+        // Gdy "nieaktywne" ukryte: odfiltruj martwe (stałe podczas jazdy) wiersze i puste sekcje.
+        val visible = if (showDeadBlocks) {
+            sections
+        } else {
+            sections
+                .map { it.copy(items = it.items.filterNot { item -> item.dead }) }
+                .filter { it.items.isNotEmpty() }
+        }
+        adapter.updateData(visible)
     }
 
     private fun String.cleanValue(): String {
