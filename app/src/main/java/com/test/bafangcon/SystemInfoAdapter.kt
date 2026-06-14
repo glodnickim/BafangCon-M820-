@@ -13,7 +13,8 @@ data class SystemInfoSection(
 
 data class SystemInfoItem(
     val label: String,
-    val value: String
+    val value: String,
+    val dead: Boolean = false   // stałe podczas jazdy → ukrywane gdy !showDeadBlocks
 )
 
 class SystemInfoAdapter(

@@ -55,10 +55,18 @@ class BleRepository(private val context: Context) {
     // --- Command Queue ---
     private val commandQueue: Queue<ByteArray> = LinkedList()
     private val isWriting = AtomicBoolean(false) // Flag to indicate ongoing write
+    // Watchdog ACK zapisu: zapisy WRITE_TYPE_DEFAULT zerują isWriting dopiero w onCharacteristicWrite.
+    // Gdy HMI bootuje, zapis bywa bez ACK i kolejka blokuje się na stałe. Po WRITE_ACK_TIMEOUT
+    // odblokowujemy isWriting i jedziemy dalej.
+    private var writeTimeoutJob: Job? = null
 
     // --- StateFlows for Parsed Data ---
     private val _controllerInfo = MutableStateFlow<ControllerInfo?>(null)
     val controllerInfo: StateFlow<ControllerInfo?> = _controllerInfo.asStateFlow()
+
+    // Telemetria na żywo z ramki broadcast 0x06 (typ 0x10, op 0x06)
+    private val _realtimeInfo = MutableStateFlow<RealtimeInfo?>(null)
+    val realtimeInfo: StateFlow<RealtimeInfo?> = _realtimeInfo.asStateFlow()
 
     private val _meterInfo = MutableStateFlow<MeterInfo?>(null)
     val meterInfo: StateFlow<MeterInfo?> = _meterInfo.asStateFlow()
@@ -224,6 +232,12 @@ class BleRepository(private val context: Context) {
     private var isAuthFlowRunning = false
     private var authTimeoutJob: Job? = null
     private var mtuAuthFallbackJob: Job? = null
+    // Watchdog wczytywania danych po autoryzacji: gdy HMI połączy się w trybie boot,
+    // autoryzacja przechodzi, ale dane nie nadchodzą i ekran wisi na "wczytuje dane".
+    // Po DATA_LOAD_TIMEOUT bez danych robimy pełny reset sesji (rozłącz+połącz), jak ręcznie.
+    private var dataLoadWatchdogJob: Job? = null
+    private var autoReconnectCount = 0
+    private var lastConnectedAddress: String? = null
     // ------------------------
 
     private data class PendingPersonalizedWrite(
@@ -236,7 +250,18 @@ class BleRepository(private val context: Context) {
         private const val TAG = "BleRepository"
         private const val SCAN_PERIOD: Long = 10000 // Scan for 10 seconds
         private const val CONNECTION_TIMEOUT: Long = 10000 // Connection attempt timeout
-        private const val AUTH_TIMEOUT: Long = 10000
+        // Wyświetlacz (licznik) potrafi wstać kilka sekund po połączeniu BLE i dopiero wtedy
+        // odpowiada na ramki AA55. Ponawiamy odczyt challenge co AUTH_RETRY_INTERVAL przez
+        // łącznie AUTH_TOTAL_TIMEOUT, żeby łączenie "zanim licznik wystartuje" też się udawało.
+        private const val AUTH_RETRY_INTERVAL: Long = 2500
+        private const val AUTH_TOTAL_TIMEOUT: Long = 45000
+        // Watchdog danych po autoryzacji: czas oczekiwania na pierwsze realne dane,
+        // odstęp przed auto-reconnectem i maks. liczba automatycznych resetów sesji.
+        private const val DATA_LOAD_TIMEOUT: Long = 8000
+        private const val RECONNECT_DELAY: Long = 1500
+        private const val MAX_AUTO_RECONNECTS: Int = 3
+        // Maks. czas oczekiwania na ACK zapisu (onCharacteristicWrite) zanim odblokujemy kolejkę.
+        private const val WRITE_ACK_TIMEOUT: Long = 1500
         private const val MTU_AUTH_FALLBACK_DELAY: Long = 1500
         private const val RIDE_LOG_INTERVAL_MS: Long = 1000
         private const val RIDE_LOG_STATUS_INTERVAL_MS: Long = 2000
@@ -273,6 +298,7 @@ class BleRepository(private val context: Context) {
         private const val RSP_STATUS_INDEX = 5      // Often 0x04?
         private const val RSP_START_POS_INDEX = 6   // Start position for partial data
         private const val RSP_PAYLOAD_START_INDEX = 7 // Index where actual data begins
+        private const val RSP_OP_REALTIME = 0x06       // op (data[5]) dla broadcastu telemetrii 0x06
         private const val RSP_MIN_HEADER_SIZE = 7 // Minimum bytes needed to read up to payload start
         private const val RSP_TRAILER_SIZE = 2 // Size after payload (CRC_L CRC_H FE)
 
@@ -429,7 +455,10 @@ class BleRepository(private val context: Context) {
 
     // --- Connection ---
     @SuppressLint("MissingPermission")
-    fun connectDevice(deviceAddress: String) {
+    fun connectDevice(deviceAddress: String, isAutoReconnect: Boolean = false) {
+        // Zapamiętaj adres do ewentualnego auto-resetu sesji (watchdog danych).
+        lastConnectedAddress = deviceAddress
+        if (!isAutoReconnect) autoReconnectCount = 0
         if (!hasRequiredPermissions()) {
             Log.e(TAG,"Connection failed: Missing Permissions")
             _connectionState.value = BleConnectionState.FAILED
@@ -571,6 +600,9 @@ class BleRepository(private val context: Context) {
         authTimeoutJob = null
         mtuAuthFallbackJob?.cancel()
         mtuAuthFallbackJob = null
+        // Anuluj watchdog danych (reconnect, jeśli trwa, działa w osobnej korutynie i przeżyje).
+        dataLoadWatchdogJob?.cancel()
+        dataLoadWatchdogJob = null
         pendingPersonalizedWrite = null
         negotiatedMtu = 23
         heartbeatJob?.cancel()
@@ -772,6 +804,7 @@ class BleRepository(private val context: Context) {
                     } else {
                         Log.e(TAG, "Failed to write to NUS RX (${characteristic.uuid}) on $deviceName. Status: $status ")
                     }
+                    writeTimeoutJob?.cancel() // ACK przyszedł na czas — anuluj watchdog
                     isWriting.set(false) // Signal write completion
                     processNextCommand() // Process next command
                 } else {
@@ -1145,21 +1178,37 @@ class BleRepository(private val context: Context) {
         isAuthFlowRunning = true
         _authState.value = BleAuthState.AUTHENTICATING
         authTimeoutJob?.cancel()
-        authTimeoutJob = coroutineScope.launch {
-            delay(AUTH_TIMEOUT)
-            if (isAuthFlowRunning && _authState.value == BleAuthState.AUTHENTICATING) {
-                failAuthentication("Authentication timeout after ${AUTH_TIMEOUT}ms")
-            }
-        }
 
-        // Step 1: Read 4 random bytes from auth device
-        val frame = createReadRequestFrame(CMD_ID_AUTH, 0, 4)
-        if (frame.isNotEmpty()) {
-            addLog("Auth read TX: ${frame.toHexString()}")
-            sendCommand(frame)
-            Log.d(TAG, "Auth step 1: sent meterRead(0x10, 0x00, 4)")
-        } else {
-            failAuthentication("Failed to create auth read frame")
+        // Cierpliwa autoryzacja: ponawiamy odczyt 4 bajtów challenge co AUTH_RETRY_INTERVAL,
+        // dopóki nie dostaniemy challenge (authChallenge != null) albo nie minie AUTH_TOTAL_TIMEOUT.
+        // Dzięki temu połączenie nawiązane zanim licznik wystartuje nie utyka na ekranie wczytywania
+        // — gdy wyświetlacz wreszcie odpowie, autoryzacja dokończy się sama.
+        authTimeoutJob = coroutineScope.launch {
+            val deadline = System.currentTimeMillis() + AUTH_TOTAL_TIMEOUT
+            var attempt = 0
+            while (isActive &&
+                isAuthFlowRunning &&
+                _authState.value == BleAuthState.AUTHENTICATING &&
+                System.currentTimeMillis() < deadline
+            ) {
+                // Wysyłaj/ponawiaj odczyt challenge tylko póki challenge nie przyszedł.
+                if (authChallenge == null) {
+                    attempt++
+                    val frame = createReadRequestFrame(CMD_ID_AUTH, 0, 4)
+                    if (frame.isNotEmpty()) {
+                        addLog("Auth read TX (próba $attempt)")
+                        sendCommand(frame)
+                        Log.d(TAG, "Auth challenge read sent (attempt $attempt)")
+                    } else {
+                        failAuthentication("Failed to create auth read frame")
+                        return@launch
+                    }
+                }
+                delay(AUTH_RETRY_INTERVAL)
+            }
+            if (isAuthFlowRunning && _authState.value == BleAuthState.AUTHENTICATING) {
+                failAuthentication("Wyświetlacz nie odpowiada (timeout ${AUTH_TOTAL_TIMEOUT}ms) — włącz licznik i połącz ponownie")
+            }
         }
     }
 
@@ -1222,6 +1271,8 @@ class BleRepository(private val context: Context) {
                 sendReadRequestCommand(CMD_ID_CONFIG)
                 sendReadRequestCommand(CMD_ID_CAN)
             }
+            // Pilnuj, czy dane faktycznie napłyną; jeśli nie (HMI w trybie boot) — zresetuj sesję.
+            startDataLoadWatchdog()
             // Start heartbeat (co 1s) to keep BLE notification stream alive
             heartbeatJob?.cancel()
             heartbeatJob = coroutineScope.launch {
@@ -1240,6 +1291,48 @@ class BleRepository(private val context: Context) {
         }
         isAuthFlowRunning = false
         authChallenge = null
+    }
+
+    /**
+     * Po udanej autoryzacji czeka na pierwsze realne dane. Gdy HMI połączy się w trybie boot,
+     * autoryzacja przechodzi, ale dane nie nadchodzą i UI wisi na "wczytuje dane". W takim
+     * przypadku po [DATA_LOAD_TIMEOUT] robimy pełny reset sesji (rozłącz + połącz ponownie),
+     * tak jak użytkownik robi to ręcznie — maks. [MAX_AUTO_RECONNECTS] razy.
+     */
+    private fun startDataLoadWatchdog() {
+        dataLoadWatchdogJob?.cancel()
+        dataLoadWatchdogJob = coroutineScope.launch {
+            val gotData = withTimeoutOrNull(DATA_LOAD_TIMEOUT) {
+                combine(
+                    _controllerInfo, _meterInfo, _personalizedInfo, _batteryInfo
+                ) { c, m, p, b -> c != null || m != null || p != null || b != null }
+                    .first { it }
+            }
+            if (gotData == true) {
+                autoReconnectCount = 0
+                Log.d(TAG, "Data arrived after auth — watchdog satisfied")
+                return@launch
+            }
+
+            val addr = lastConnectedAddress
+            if (_connectionState.value == BleConnectionState.CONNECTED &&
+                addr != null &&
+                autoReconnectCount < MAX_AUTO_RECONNECTS
+            ) {
+                autoReconnectCount++
+                addLog("Brak danych ${DATA_LOAD_TIMEOUT}ms po autoryzacji — auto-reset sesji #$autoReconnectCount")
+                Log.w(TAG, "No data after auth; resetting BLE session (#$autoReconnectCount/$MAX_AUTO_RECONNECTS)")
+                // Osobna korutyna: anulowanie watchdoga przy disconnect nie może przerwać reconnectu.
+                coroutineScope.launch {
+                    disconnect()
+                    delay(RECONNECT_DELAY)
+                    connectDevice(addr, isAutoReconnect = true)
+                }
+            } else if (autoReconnectCount >= MAX_AUTO_RECONNECTS) {
+                addLog("Auto-reset: osiągnięto limit $MAX_AUTO_RECONNECTS prób — przerwij i połącz ręcznie")
+                Log.e(TAG, "Auto-reconnect limit reached; giving up")
+            }
+        }
     }
 
     private fun failAuthentication(message: String) {
@@ -1450,12 +1543,24 @@ class BleRepository(private val context: Context) {
                     if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) {
                         isWriting.set(false)
                         processNextCommand()
+                    } else {
+                        // WRITE_TYPE_DEFAULT: czekamy na onCharacteristicWrite, ale z timeoutem,
+                        // żeby brak ACK (HMI w trybie boot) nie zablokował kolejki na stałe.
+                        writeTimeoutJob?.cancel()
+                        writeTimeoutJob = coroutineScope.launch {
+                            delay(WRITE_ACK_TIMEOUT)
+                            if (isWriting.compareAndSet(true, false)) {
+                                Log.w(TAG, "Write ACK timeout — odblokowuję kolejkę")
+                                addLog("Write ACK timeout, kolejka odblokowana")
+                                processNextCommand()
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    private fun clearCommandQueue() { synchronized(commandQueue) { commandQueue.clear() }; isWriting.set(false); Log.d(TAG, "Command queue cleared.") }
+    private fun clearCommandQueue() { writeTimeoutJob?.cancel(); synchronized(commandQueue) { commandQueue.clear() }; isWriting.set(false); Log.d(TAG, "Command queue cleared.") }
 
     // This function now directly processes the 55 AA ... FE frame
     private fun processBleNotificationData(data: ByteArray) {
@@ -1651,6 +1756,27 @@ class BleRepository(private val context: Context) {
         // Log header info AFTER validation
         Log.d(TAG,"Validated Frame Header: Type=0x${rspType.toHexString()} StartPos=$rspStartPos (Actual Payload Size=$actualPayloadSize)")
         logWriteAckIfPresent(data, payloadData)
+
+        // --- Ramka telemetrii broadcast 0x06 (typ 0x10 + op 0x06), nadawana co ~0,7 s ---
+        // Wyłapujemy ją PRZED podziałem full/partial, bo ma StartPos != 0 i typ 0x10 (auth),
+        // więc inaczej trafiłaby do gałęzi "Unknown Type" i była odrzucana.
+        val rspStatus = data[RSP_STATUS_INDEX].toInt() and 0xFF
+        if (rspType == CMD_ID_AUTH && rspStatus == RSP_OP_REALTIME && !isAuthFlowRunning) {
+            // Owijamy w try/catch: jesteśmy w callbacku GATT — żaden wyjątek przy parsowaniu
+            // nieoczekiwanej ramki nie może ubić wątku BLE.
+            try {
+                val info = RealtimeInfo.parse(payloadData)
+                if (info != null) {
+                    _realtimeInfo.value = info
+                    Log.v(TAG, "Realtime 0x06: SOC=${info.soc}% torque=${info.torqueRaw} range=${info.remainingRangeRaw}")
+                } else {
+                    Log.w(TAG, "Realtime 0x06: payload too short (${payloadData.size})")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Realtime 0x06: parse failed", e)
+            }
+            return
+        }
 
         // 4. Differentiate Full vs Partial based on Start Position
         if (rspStartPos == 0) {
