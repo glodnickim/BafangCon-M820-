@@ -24,6 +24,7 @@
     <!-- NOT used by BafangCon; removed to avoid install-time permission warnings -->
 
     <application
+        android:name="com.test.bafangcon.BafangApp"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -42,6 +43,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Ekran awaryjny pokazujący stack trace; osobny proces, by przeżył śmierć głównego. -->
+        <activity
+            android:name="com.test.bafangcon.CrashActivity"
+            android:exported="false"
+            android:process=":crash"
+            android:theme="@style/Theme.BafangConApp" />
 
     </application>
 
