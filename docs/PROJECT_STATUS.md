@@ -2,10 +2,19 @@
 
 ## Current Version
 
-- **version.properties:** 0.042 (versionCode=42)
-- **Last released APK:** 0.042 (Bafang FT M820 v0.042.apk)
-- **Last Build:** 2026-06-08 (assembleRelease)
-- **Build Type:** Release APK (2.7 MB)
+- **version.properties:** 0.063 (versionCode=63)
+- **Last released APK:** 0.063 (Bafang FT M820 v0.063.apk)
+- **Last Build:** 2026-06-14 (assembleRelease)
+- **Build Type:** Release APK (signed, split by ABI + universal)
+
+### Recent highlights (v0.063)
+
+- Realtime `0x06` broadcast telemetry parsed and shown in the System tab.
+- Resilient connect: patient authentication (retries up to 45 s) and assist-data
+  loading that waits out the display's boot (it returns zeros until ready).
+- Release-stability fixes: hardened R8 keep rules (startup crash), clean-build
+  guidance for the `NoSuchFieldError` view-binding crash, write-ACK queue watchdog.
+- On-screen crash reporter (temporary diagnostic aid).
 
 ## Stable Features
 
